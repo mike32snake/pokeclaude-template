@@ -1,0 +1,13 @@
+{
+  "name": "pokeclaude",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "node src/server/index.js",
+    "test": "node --test tests/*.test.js",
+    "build:town": "for n in 3 4 5; do node tools/build-town.js $n; done",
+    "pretest": "node tools/prepare.js",
+    "prepare": "node tools/prepare.js"
+  }
+}

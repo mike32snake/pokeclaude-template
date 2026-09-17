@@ -1,0 +1,22 @@
+{
+  "_comment": "Copy of the shape config/repos.json takes. The server seeds repos.json from this file on first boot, so edit repos.json (yours, gitignored) and leave this one alone. dir may start with ~. archetype picks the shed: center, mart, office, command, clinic, tower, guild, workshop, lab, block, shop, house, tent.",
+  "grid": {
+    "cols": 4,
+    "rows": 3,
+    "plotW": 16,
+    "plotH": 16,
+    "street": 3,
+    "border": 2
+  },
+  "repos": [
+    { "dir": "~/Projects/api", "archetype": "command", "plot": 0 },
+    { "dir": "~/Projects/web", "archetype": "office", "plot": 1 },
+    { "dir": "~/Projects/infra", "archetype": "tower", "plot": 2 },
+    { "dir": "~/Projects/scratch", "archetype": "lab", "plot": 3 }
+  ],
+  "fallback": {
+    "sign": "outskirts",
+    "archetype": "tent",
+    "plot": 11
+  }
+}

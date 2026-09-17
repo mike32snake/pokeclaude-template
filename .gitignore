@@ -1,0 +1,19 @@
+node_modules/
+tools/venv/
+art-src/
+.DS_Store
+.env
+shots/
+uploads/
+public/art/pokemon/
+data/
+.playwright-mcp/
+
+# Yours, not the project's: a list of absolute folder paths. config.js seeds it from
+# config/repos.example.json on the first read.
+config/repos.json
+
+# Generated, and only true on the machine that built them: a layout stores each repo's
+# ABSOLUTE directory, which is the key the client matches a live agent's cwd against.
+# The server builds them on boot from config/repos.json.
+public/art/town-*.json

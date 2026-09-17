@@ -1,0 +1,552 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PokeClaude</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:100%;height:100%;overflow:hidden;background:#0d1117;font-family:"Courier New",monospace}
+#app{display:flex;width:100%;height:calc(100% - 26px)}
+#statusbar{position:fixed;left:0;right:0;bottom:0;height:26px;z-index:40;display:flex;
+  align-items:center;gap:10px;padding:0 12px;background:#12161c;border-top:2px solid #000;
+  font:11px "Courier New",monospace;color:#8b949e;white-space:nowrap;overflow:hidden}
+.sb-group{display:flex;align-items:center;gap:7px}
+.sb-spacer{flex:1}
+.sb-sep{width:1px;height:14px;background:#2a313c}
+.sb-n{color:#e6edf3;font-weight:bold}
+.sb-block{color:#ff6b60;font-weight:bold}
+.sb-work{color:#7ddc86;font-weight:bold}
+.sb-idle{color:#8b949e;font-weight:bold}
+.sb-svc{color:#9fd6a6}
+.sb-meter{display:inline-block;width:54px;height:7px;background:#2a313c;border:1px solid #000;
+  vertical-align:middle;position:relative;overflow:hidden}
+.sb-meter i{position:absolute;left:0;top:0;bottom:0;background:#4d8bf0;display:block}
+.sb-meter.hot i{background:#ffb454}
+.sb-meter.crit i{background:#ff6b60}
+.sb-dim{color:#5c6673}
+
+/* ---- left third: the panel ---- */
+#panel{width:30%;min-width:340px;max-width:460px;height:100%;background:#f7f6ef;
+  border-right:4px solid #1a1a1a;display:flex;flex-direction:column;color:#111;
+  transition:width .12s ease,min-width .12s ease}
+#panel.collapsed{width:38px;min-width:38px;max-width:38px}
+/* The divider you drag. It had behaviour in main.js and no size here, so it was a
+   zero-width invisible div: the handler was attached to something nobody could grab.
+   8px is the narrowest strip that is still easy to hit. It sits on the panel's own
+   black border rather than adding a second line, and only shows itself on hover. */
+#drag{flex:0 0 8px;margin-left:-4px;z-index:3;cursor:col-resize;align-self:stretch;
+  background:transparent;transition:background .12s ease}
+#drag:hover,#drag.dragging{background:rgba(120,180,255,.75)}
+#panel.collapsed + #drag{display:none}
+/* The panel animates its width, which during a drag lags the pointer and feels like
+   the divider is on a rubber band. Off while dragging, and no text selection either. */
+body.resizing{cursor:col-resize;user-select:none}
+body.resizing #panel{transition:none}
+#panel.collapsed #panel-body,#panel.collapsed #composer,#panel.collapsed #panel-foot,
+#panel.collapsed #panel-head b,#panel.collapsed #panel-back{display:none}
+#panel.collapsed #panel-head{flex-direction:column;gap:8px;padding:8px 4px;height:100%;
+  align-items:center;border-bottom:none}
+#panel.collapsed #blocked-pill{margin-left:0}
+#panel-head{padding:10px 14px;border-bottom:3px solid #1a1a1a;background:#1a1a1a;color:#fff;
+  display:flex;align-items:center;gap:10px;flex-shrink:0}
+#panel-head b{font-size:14px;letter-spacing:1px}
+#blocked-pill{margin-left:auto;background:#c62828;color:#fff;font-size:11px;font-weight:bold;
+  padding:2px 8px;border-radius:9px}
+#panel-back{font:bold 12px "Courier New",monospace;border:1px solid #6b7280;background:transparent;
+  color:#fff;padding:1px 7px;cursor:pointer;box-shadow:none;flex-shrink:0}
+#panel-back:hover{background:rgba(255,255,255,.18)}
+#panel-back[hidden]{display:none}
+#blocked-pill.zero{background:#2e7d32}
+#panel-body{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:9px}
+
+/* blocked-agent strip: click a face to switch conversations */
+#queue-strip{display:flex;gap:4px;overflow-x:auto;padding:6px 8px;background:#e9e7dc;
+  border-bottom:2px solid #1a1a1a;flex-shrink:0;min-height:44px;align-items:center}
+#queue-strip .qa{position:relative;width:34px;height:34px;flex-shrink:0;cursor:pointer;
+  border:2px solid transparent;border-radius:4px;display:flex;align-items:flex-end;justify-content:center}
+#queue-strip .qa img{image-rendering:pixelated;max-height:30px}
+#queue-strip .qa:hover{background:#fff}
+#queue-strip .qa.sel{border-color:#0648C0;background:#fff}
+#queue-strip .qa i{position:absolute;top:-2px;right:-2px;background:#c62828;color:#fff;
+  font-style:normal;font-size:8px;font-weight:bold;padding:0 3px;border-radius:6px;line-height:1.5}
+#queue-strip .qa.st-WORKING i,#queue-strip .qa.st-THINKING i{background:#1b5e20}
+#queue-strip .qa.st-ASLEEP i{background:#8a8f98}
+#queue-strip .qa.st-FAINTED i{background:#5d4037}
+#queue-strip .qa.st-ASLEEP img,#queue-strip .qa.st-FAINTED img{opacity:.6}
+#queue-strip .none{font-size:11px;color:#777;padding-left:6px}
+
+/* Agent view: terminal CONTENT, house styling. Cream surface, ink text, generous
+   line height, each turn clearly separated. */
+#panel-body.term-mode{background:#f7f6ef;padding:0;gap:0}
+#panel-body.term-mode .t-head{position:sticky;top:0;z-index:2;background:#f7f6ef;
+  border-bottom:3px solid #1a1a1a;box-shadow:0 3px 6px -4px rgba(0,0,0,.4)}
+#panel-body.term-mode .hd{color:#111;border-bottom:none;padding:10px 14px 4px;margin:0}
+#panel-body.term-mode .muted{color:#6b7280;padding:0 14px 8px;margin:0;font-size:11px}
+#panel-body.term-mode .btns{padding:0 14px 9px;margin:0}
+
+.term{font:13px/1.75 "Courier New",monospace;color:#1a1a1a;padding:12px 14px 18px;
+  white-space:pre-wrap;word-break:break-word}
+
+/* your prompt: the one thing that should catch the eye when scanning back */
+.t-user{color:#0648C0;font-weight:bold;background:#e8effb;border-left:4px solid #0648C0;
+  padding:8px 10px;margin:16px 0 10px;border-radius:0 3px 3px 0}
+.t-user .md-p{margin-bottom:4px}
+.t-user.pending{opacity:.55}
+
+/* the reply: plain ink, the most readable thing on the page */
+.t-asst{color:#1a1a1a;margin:0 0 10px}
+.md-p{margin:0 0 8px;white-space:pre-wrap}
+.md-p:last-child{margin-bottom:0}
+.md-h{font-weight:bold;margin:12px 0 6px;color:#0b0d10}
+.md-h1{font-size:15px}.md-h2{font-size:14px}.md-h3,.md-h4{font-size:13px}
+.md-list{margin:0 0 8px 18px;padding:0}
+.md-list li{margin:2px 0}
+.md-quote{border-left:4px solid #b9bfae;background:#efeee4;padding:6px 10px;margin:0 0 8px;color:#3d4450}
+.md-hr{border:0;border-top:2px solid #d9ded4;margin:10px 0}
+.t-asst code,.t-user code{background:#e7e6dc;border:1px solid #d3d2c6;border-radius:3px;
+  padding:0 3px;font-size:12px}
+.md-code{background:#12161c;color:#c9d1d9;border:2px solid #1a1a1a;border-radius:3px;
+  padding:8px 10px;margin:0 0 8px;overflow-x:auto;font-size:11.5px;line-height:1.5;white-space:pre}
+.md-code code{background:none;border:0;padding:0;font-size:inherit;color:inherit}
+.md-tablewrap{overflow-x:auto;margin:0 0 10px;border:2px solid #1a1a1a;background:#fff}
+.md-table{border-collapse:collapse;width:100%;font-size:12px}
+.md-table th,.md-table td{border:1px solid #d9ded4;padding:5px 8px;text-align:left;
+  vertical-align:top;white-space:normal}
+.md-table th{background:#efeee4;font-weight:bold;white-space:nowrap}
+.md-table tr:nth-child(even) td{background:#faf9f2}
+.t-asst a,.t-user a{color:#0648C0}
+
+/* tool calls: quieter than prose, still scannable */
+.t-tool{color:#1b5e20;margin:2px 0;font-size:12px;padding-left:2px}
+.t-act{color:#1b5e20;margin:3px 0;font-size:12px;font-weight:bold;padding-left:2px}
+.ask{border:2px solid #1a1a1a;background:#fff;margin:10px 0;padding:0 0 8px}
+.ask-badge{font-size:9px;letter-spacing:1.5px;font-weight:bold;padding:4px 9px;color:#fff}
+.ask-pending{border-color:#c62828;box-shadow:2px 2px 0 #c62828}
+.ask-pending .ask-badge{background:#c62828}
+.ask-answered .ask-badge{background:#1b5e20}
+.ask-rejected{border-color:#8a6100}
+.ask-rejected .ask-badge{background:#8a6100}
+.ask-q{padding:8px 10px 2px}
+.ask-hd{display:inline-block;font-size:9px;letter-spacing:1px;font-weight:bold;color:#fff;
+  background:#3d4450;padding:1px 6px;border-radius:2px;margin-bottom:5px}
+.ask-text{font-weight:bold;color:#111;margin-bottom:6px}
+.ask-text .md-p{margin:0}
+.ask-opt{border:1px solid #d9ded4;background:#faf9f2;padding:5px 8px;margin:3px 0;font-size:11.5px}
+.ask-opt b{display:block;color:#3d4450}
+.ask-opt span{display:block;color:#6b7280;margin-top:2px;line-height:1.45}
+.ask-opt.picked{border-color:#1b5e20;background:#eef7ef}
+.ask-opt.picked b{color:#1b5e20}
+.ask-opt.picked b::before{content:'✓ '}
+.ask-opt.live{cursor:pointer}
+.ask-opt.live:hover{border-color:#0648C0;background:#eef3fd;box-shadow:2px 2px 0 #0648C0}
+.ask-opt.live.busy{opacity:.55;cursor:progress}
+.ask-opt.on{border-color:#4d8bf0}
+.ask-opt.on b::before{content:"\276f ";color:#4d8bf0}
+.ask-screen{margin:6px 0 0;padding:8px 10px;background:#0d0f13;border:1px solid #2a2f3a;
+  border-radius:4px;font:11px/1.45 ui-monospace,Menlo,monospace;color:#cfd6e4;
+  white-space:pre-wrap;overflow-x:auto;max-height:340px}
+.ask-hint{font-size:10px;color:#6b7280;padding:2px 10px 0}
+/* One ask can carry several questions. Without the strip, answering the one on screen
+   looks like nothing happened when it has simply moved on to the next. */
+.ask-tabs{display:flex;flex-wrap:wrap;gap:4px;padding:6px 10px 0}
+.ask-tab{font-size:9px;letter-spacing:.5px;font-weight:bold;padding:2px 6px;
+  border:1px solid #d9ded4;background:#faf9f2;color:#6b7280}
+.ask-tab.done{border-color:#1b5e20;background:#eef7ef;color:#1b5e20}
+.ask-box{font-style:normal;margin-right:5px;color:#6b7280}
+.ask-opt.checked{border-color:#1b5e20;background:#eef7ef}
+.ask-opt.checked .ask-box{color:#1b5e20}
+/* The terminal's own two rows are not answers, so they must not look like one. */
+.ask-opt.extra{cursor:pointer;background:#f2f1ea;border-style:dashed}
+.ask-opt.extra b{color:#6b7280}
+.ask-opt.extra:hover{border-color:#0648C0;color:#0648C0}
+/* A draft stuck in the pane's box: the two things you would do in the tab, here. */
+.stuck{margin:6px 10px;padding:8px 10px;border:1px solid #c9a227;background:#fff8e1;font-size:11px}
+.stuck-q{color:#6b5300;margin-bottom:4px}
+.stuck-draft{margin:0 0 6px;padding:4px 6px;background:#fff;border:1px solid #e6d9a3;
+  font:11px/1.4 ui-monospace,Menlo,monospace;white-space:pre-wrap;max-height:120px;overflow:auto}
+.stuck-row{display:flex;gap:6px;flex-wrap:wrap}
+.stuck-row button{font:inherit;font-size:10px;padding:3px 8px;cursor:pointer;
+  border:1px solid #9a8a3a;background:#fff;color:#3a3000}
+.stuck-row button:hover{border-color:#0648C0;color:#0648C0}
+.stuck-row button:disabled{opacity:.5;cursor:default}
+.q-row .snip{display:block;color:#555;font-size:10px;line-height:1.45;margin-top:3px;
+  white-space:normal}
+/* Which CLI wrote a past session: the PC and the archive list both engines in one list. */
+.eng{display:inline-block;font:bold 8px/1 ui-monospace,Menlo,monospace;letter-spacing:.5px;
+  padding:2px 4px;margin-right:6px;border:1px solid #1a1a1a;vertical-align:middle;
+  background:#fff;color:#1a1a1a}
+.eng-codex{background:#1a1a1a;color:#fff}
+.eng-claude{border-color:#0648C0;color:#0648C0}
+.t-arg{color:#6b7280}
+/* The break between the pinned opening ask and the recent turns. */
+.t-gap{display:flex;align-items:center;gap:8px;color:#8b949e;font-size:10px;
+  letter-spacing:1px;text-transform:uppercase;margin:10px 0}
+.t-gap:before,.t-gap:after{content:"";flex:1;border-top:2px dashed #cfd6e0}
+.t-note{color:#8a6100;background:#fdf6e3;border-left:4px solid #8a6100;padding:8px 10px;
+  margin:10px 0;font-weight:normal}
+#panel-body.term-mode pre.screen{margin:12px 0 0;background:#111;color:#cfc;
+  border:2px solid #1a1a1a;font-size:11px;line-height:1.4}
+
+/* Terminal recovery stays readable beside the saved chat composer. */
+#panel-body.term-mode .terminal-controls{padding:10px;margin:8px;font:12px/1.4 monospace}
+#panel-body.term-mode .terminal-controls p{margin:6px 0;padding:0;font-size:11px}
+#panel-body.term-mode .terminal-controls pre.screen{max-height:170px;margin:8px 0;white-space:pre;overflow:auto}
+#panel-body.term-mode .terminal-controls .btns{padding:0;margin:7px 0;gap:4px}
+.terminal-controls button{font:11px monospace;padding:5px;cursor:pointer}
+.terminal-controls input{min-width:0;width:100%;box-sizing:border-box;font:12px monospace;padding:6px}
+.terminal-controls button:disabled{opacity:.5;cursor:wait}
+
+/* chat bubbles */
+.msg{max-width:94%;font-size:12px;line-height:1.55;white-space:pre-wrap;word-break:break-word;
+  padding:8px 10px;border:2px solid #1a1a1a}
+.msg.user{align-self:flex-end;background:#dbe6fb;border-color:#0648C0}
+.msg.assistant{align-self:flex-start;background:#fff}
+.msg .who{display:block;font-size:9px;letter-spacing:1px;color:#666;margin-bottom:3px}
+.msg .tool{display:block;font-size:10px;color:#1b5e20;margin-top:4px;white-space:pre-wrap}
+.msg.pending{opacity:.55}
+
+/* composer pinned to the bottom */
+#composer{display:flex;gap:6px;padding:8px;border-top:3px solid #1a1a1a;background:#e9e7dc;flex-shrink:0}
+#composer textarea{flex:1;height:auto;min-height:34px;max-height:120px;resize:none;font:12px "Courier New",monospace;
+  border:2px solid #1a1a1a;padding:7px}
+#composer textarea:disabled{background:#f2f1ea;color:#999}
+#composer button{width:44px;font-size:14px;padding:0}
+#composer-clip{width:32px;font-size:16px;font-weight:bold}
+#panel{position:relative}
+#panel.dropping::after{content:'Drop to attach';position:absolute;inset:0;z-index:30;
+  display:flex;align-items:center;justify-content:center;pointer-events:none;
+  background:rgba(6,72,192,.14);border:3px dashed #0648C0;
+  font:bold 13px "Courier New",monospace;color:#0648C0;letter-spacing:1px}
+#attachments{display:flex;flex-wrap:wrap;gap:5px;padding:6px 8px 0;background:#e9e7dc}
+#attachments:empty{display:none}
+/* The NEW AGENT form stages files the same way the composer does, so it reuses the
+   same chips; only the surface around them differs. */
+.attstrip{display:flex;flex-wrap:wrap;gap:5px;margin-top:6px}
+.attstrip:empty{display:none}
+.clip{width:32px;font-size:16px;font-weight:bold;flex:0 0 auto}
+.att{display:flex;align-items:center;gap:5px;background:#fff;border:2px solid #1a1a1a;
+  padding:2px 5px;font:10px "Courier New",monospace;max-width:190px}
+.att img{width:22px;height:22px;object-fit:cover;image-rendering:auto}
+.att span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.att b{cursor:pointer;color:#c62828;padding:0 2px}
+#feed-wrap{border-left:4px solid #1a1a1a;background:#12161c;flex-shrink:0;width:248px;height:100%;
+  display:flex;flex-direction:column;transition:width .12s ease}
+#feed-wrap.collapsed{width:34px}
+#feed-wrap.collapsed #feed{display:none}
+#feed-wrap.collapsed .feed-hd span{writing-mode:vertical-rl;margin-top:8px}
+.feed-hd{font-size:10px;letter-spacing:2px;font-weight:bold;color:#7f8a99;padding:7px 10px;
+  border-bottom:1px solid #263040;display:flex;align-items:center;gap:8px;flex-shrink:0}
+#feed-wrap.collapsed .feed-hd{flex-direction:column;border-bottom:none}
+#feed{overflow-y:auto;padding:6px 10px 8px;font-size:11px;line-height:1.6;color:#c7d0da}
+#feed .fl{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;break-inside:avoid}
+#feed .ft{color:#5c6673;margin-right:6px}
+#feed .st-BLOCKED{color:#ff6b60;font-weight:bold}
+#feed .st-WORKING{color:#7ddc86}
+#feed .st-ASLEEP,#feed .st-NONE{color:#7f8a99}
+#feed .st-FAINTED{color:#ff6b60}
+#panel-foot{border-top:2px solid #1a1a1a;padding:7px 14px;font-size:10px;color:#555;
+  background:#efeee4;flex-shrink:0;line-height:1.7;white-space:pre}
+#panel-foot .key{display:block;color:#222;margin-bottom:2px}
+#panel-foot .key b{color:#c62828}
+#panel-foot .k-ask{background:#4d8bf0;color:#fff;padding:0 4px;border-radius:3px}
+#panel-foot .k-ask2{background:#0648C0;color:#fff;padding:0 4px;border-radius:3px}
+#panel-foot .k-warn{background:#fff;color:#c62828;border:1px solid #c62828;padding:0 4px;border-radius:3px}
+#panel-foot .k-think{color:#555}
+#panel-foot .k-zzz{color:#4a5160}
+#panel-foot .k-ask{background:#4d8bf0;color:#fff;padding:0 4px;border-radius:3px}
+#panel-foot .k-ask2{background:#0648C0;color:#fff;padding:0 4px;border-radius:3px}
+#panel-foot .k-warn{background:#fff;color:#c62828;border:1px solid #c62828;padding:0 4px;border-radius:3px}
+#panel-foot .k-think{color:#555}
+#panel-foot .k-zzz{color:#4a5160}
+
+/* ---- right two-thirds: the ranch ---- */
+#right{flex:1;height:100%;display:flex;flex-direction:column;min-width:0}
+/* The field has no edge: the same grass tile repeats behind the canvas, so the map
+   bleeds into open country instead of sitting on a flat green rectangle. */
+/* The field scrolls both ways and is dragged by its empty ground. `safe center` is
+   what keeps a map bigger than the stage from being clipped at the top and left:
+   plain centring in a flex scroll box makes the overflow unreachable. */
+#stage{flex:1;min-height:0;overflow:auto;position:relative;cursor:grab;
+  display:flex;align-items:safe center;justify-content:safe center;
+  background-color:#7bc47f;background-image:url('/art/tiles/grass.png');
+  background-repeat:repeat;image-rendering:pixelated}
+#stage.panning,#stage.panning canvas{cursor:grabbing}
+/* The stage and the auth strip stack in one column, so the strip never scrolls
+   away with the field and the canvas fits the space above it. */
+#stage-col{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}
+#auth-bar{flex:none;min-height:22px;display:flex;flex-wrap:wrap;align-items:center;
+  gap:1px 4px;padding:1px 6px;white-space:nowrap;background:#12161c;border-top:2px solid #000;
+  color:#e8eef5;font:bold 10px "Courier New",monospace;letter-spacing:.2px}
+#auth-bar.bad{border-top-color:#b3261e}
+#auth-bar .ab-head{color:#9fd6a6;cursor:pointer;flex:none}
+#auth-bar.bad .ab-head{color:#ff8a80}
+#auth-bar .ab-head:hover{text-decoration:underline}
+/* A group is not a box: its label and chips flow one by one, so a row can break
+   inside a group instead of pushing the whole group down a line. */
+#auth-bar .ab-group{display:contents}
+#auth-bar .ab-lbl{color:#8b949e;margin-left:4px}
+#auth-bar .ab-chip{font:inherit;display:inline-flex;align-items:center;gap:3px;padding:0 3px;line-height:15px;
+  border:1px solid #2a2f36;border-radius:3px;background:rgba(255,255,255,.04);color:#c9d1d9}
+#auth-bar .ab-chip i{width:6px;height:6px;border-radius:50%;background:#8b949e;display:inline-block}
+#auth-bar .ab-chip.ok i{background:#4cd964}
+#auth-bar .ab-chip.bad{border-color:#b3261e;color:#ffb4ab}
+#auth-bar .ab-chip.bad i{background:#ff5252;box-shadow:0 0 4px #ff5252}
+#auth-bar .ab-chip.fix{cursor:pointer}
+#auth-bar .ab-chip.fix:hover{background:rgba(255,82,82,.18)}
+#auth-bar .ab-chip.unknown{opacity:.7}
+canvas{display:block;image-rendering:pixelated;margin:auto;flex-shrink:0}
+#filter-ctl{position:absolute;top:8px;left:8px;z-index:4}
+#filter-btn{background:rgba(0,0,0,.66);border:1px solid #000;color:#e8eef5;
+  font:bold 10px "Courier New",monospace;padding:5px 9px;cursor:pointer;box-shadow:none;
+  border-radius:3px;letter-spacing:1px}
+#filter-btn:hover{background:rgba(0,0,0,.8)}
+#filter-count{color:#9fd6a6;margin-left:5px}
+#filter-count.on{color:#ffd479}
+#filter-menu{display:none;margin-top:5px;background:#12161c;border:2px solid #000;
+  border-radius:3px;padding:7px;max-height:60vh;overflow-y:auto;width:236px;
+  box-shadow:0 6px 16px rgba(0,0,0,.5)}
+#filter-ctl.open #filter-menu{display:block}
+.f-row{display:grid;grid-template-columns:14px 10px 1fr;align-items:center;gap:8px;
+  padding:4px 6px;color:#c7d0da;font:11px "Courier New",monospace;cursor:pointer;border-radius:2px}
+.f-repo{grid-template-columns:10px 14px 10px 1fr;gap:7px;user-select:none;touch-action:none;
+  border-top:2px solid transparent;border-bottom:2px solid transparent}
+.f-grip{color:#4c5764;font-size:11px;line-height:1;text-align:center;cursor:grab}
+.f-repo:hover .f-grip{color:#8b96a5}
+.f-repo.dragging{opacity:.4;cursor:grabbing}
+.f-repo.drop-above{border-top-color:#ffd479}
+.f-repo.drop-below{border-bottom-color:#ffd479}
+.f-row > span:last-child{min-width:0;overflow-wrap:anywhere;line-height:1.35;text-align:left}
+.f-row input[type=checkbox]{margin:0;width:13px;height:13px;justify-self:center;
+  accent-color:#4d8bf0;cursor:pointer}
+.f-row:hover{background:rgba(255,255,255,.08)}
+.f-actions{display:flex;gap:6px;padding:0 0 7px;margin-bottom:5px;
+  border-bottom:1px solid #263040}
+.f-actions button{flex:1;background:#21262d;border:1px solid #30363d;color:#c9d1d9;
+  font:bold 9px "Courier New",monospace;padding:4px 0;cursor:pointer;box-shadow:none}
+.f-actions button:hover{background:#30363d}
+.f-swatch{width:10px;height:10px;border:1px solid rgba(255,255,255,.45);
+  border-radius:2px;justify-self:center}
+#grid-ctl{position:absolute;top:8px;left:50%;transform:translateX(-50%);z-index:3;display:flex;
+  background:rgba(0,0,0,.66);border:1px solid #000;border-radius:3px;overflow:hidden}
+#grid-ctl button{border:0;background:transparent;color:#e8eef5;font:bold 10px "Courier New",monospace;
+  padding:5px 10px;cursor:pointer;box-shadow:none;border-right:1px solid rgba(255,255,255,.18)}
+#grid-ctl button:last-child{border-right:0}
+#grid-ctl button:hover{background:rgba(255,255,255,.18)}
+#grid-ctl button.on{background:#0648C0;color:#fff}
+#zoom-ctl{position:absolute;top:8px;right:8px;z-index:3;display:flex;align-items:stretch;gap:0;
+  background:rgba(0,0,0,.66);border:1px solid #000;border-radius:3px;overflow:hidden}
+#zoom-ctl button{border:0;background:transparent;color:#e8eef5;font:bold 13px "Courier New",monospace;
+  width:24px;cursor:pointer;box-shadow:none;padding:0}
+#zoom-ctl button:hover{background:rgba(255,255,255,.18)}
+#zoom-pct{color:#e8eef5;font:bold 10px "Courier New",monospace;min-width:46px;text-align:center;
+  padding:4px 4px;cursor:pointer;border-left:1px solid rgba(255,255,255,.2);
+  border-right:1px solid rgba(255,255,255,.2);user-select:none}
+#zoom-pct.auto{color:#9fd6a6}
+#zoom-pct:hover{background:rgba(255,255,255,.18)}
+#tooltip{position:absolute;bottom:0;z-index:2;left:0;right:0;color:#9ee;background:rgba(0,0,0,.65);
+  font-size:12px;padding:3px 10px;display:none}
+
+
+
+/* ---- ash ---- */
+.ash-thread{display:flex;flex:none;flex-direction:column;gap:2px;margin:2px 0 8px}
+.ash-meta{font-size:10px;color:#8b949e;margin:2px 0 10px}
+.ash-src{display:inline-block;margin:3px 4px 0 0;padding:1px 6px;border:1px solid #c8c8c8;
+  border-radius:3px;background:#fff;color:#444;cursor:pointer;max-width:100%;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;vertical-align:top}
+.ash-src:hover{border-color:#0648C0;color:#0648C0}
+.ash-err{border:2px solid #b3261e;background:#fff;color:#b3261e;padding:7px 9px;
+  font-size:11.5px;margin:2px 0}
+.ash-thread .t-user{opacity:1}
+
+/* ---- crons ---- */
+.cron-row{display:flex;flex:none;gap:8px;align-items:center;padding:7px 8px;border:2px solid #1a1a1a;
+  background:#fff;margin-bottom:6px;cursor:pointer;font-size:12px;box-shadow:2px 2px 0 #1a1a1a}
+.cron-row:hover{background:#fffbe6}
+.cron-row.sel{background:#e8f0fe;border-color:#0648C0;box-shadow:2px 2px 0 #0648C0}
+.cron-row .who{flex:1;min-width:0}
+.cron-row .who b{display:block;font-size:12px}
+.cron-row .who span{display:block;color:#666;font-size:11px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+/* The description is the row's point, so it WRAPS (two lines) while the schedule line
+   below it stays a single ellipsised line. */
+.cron-row .who span.cr-desc{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;white-space:normal;color:#3d4450;font-size:11px;line-height:1.35;margin:1px 0 2px}
+.cron-row .who span.cr-desc.thin{color:#8b949e;font-style:italic}
+.cron-row .facts{color:#8b949e;font-size:10px;margin-top:2px}
+.cron-row .facts.hot{color:#b3261e;font-weight:bold}
+.cron-row .cr-when{text-align:right;flex-shrink:0}
+.cron-row .cr-when b{display:block;font-size:11.5px;color:#3d4450}
+.cron-row .cr-when span{display:block;font-size:10px;color:#8b949e}
+.cr-dot{width:9px;height:9px;flex-shrink:0;border:2px solid #1a1a1a;background:#cfd6e0}
+.cr-ok .cr-dot{background:#8fbf7f}
+.cr-due .cr-dot{background:#ffd479}
+.cr-running .cr-dot{background:#4d8bf0}
+.cr-unloaded .cr-dot{background:#c9c8bc}
+.cr-failed .cr-dot,.cr-stalled .cr-dot{background:#b3261e}
+.cr-failed,.cr-stalled{border-color:#b3261e;box-shadow:2px 2px 0 #b3261e}
+.cr-failed .cr-when b,.cr-stalled .cr-when b{color:#b3261e}
+.cron-log{flex:none;max-height:240px;overflow:auto;margin:-2px 0 8px;padding:8px 10px;
+  border:2px solid #1a1a1a;border-top:none;background:#12161c;color:#cfd6e0;
+  font-size:10.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+.cr-badge{background:#b3261e;color:#fff;padding:0 4px;margin-left:3px}
+/* the open row's actions sit between the row and its log; flex:none or the column squashes them */
+.cron-acts{flex:none;margin:-4px 0 4px}
+.cron-acts button{font-size:10.5px;padding:5px 8px}
+
+/* ---- panel content ---- */
+.q-row{display:flex;gap:8px;align-items:center;padding:7px 8px;border:2px solid #1a1a1a;
+  background:#fff;margin-bottom:6px;cursor:pointer;font-size:12px;box-shadow:2px 2px 0 #1a1a1a}
+.q-row:hover{background:#fffbe6}
+.q-row.sel{background:#e8f0fe;border-color:#0648C0;box-shadow:2px 2px 0 #0648C0}
+.q-row .sp{width:34px;height:30px;flex-shrink:0;display:flex;align-items:flex-end;justify-content:center}
+.q-row .sp img{image-rendering:pixelated;max-height:30px}
+.svc-ico{font-size:17px;color:#3d4450;line-height:1}
+.q-row .who{flex:1;min-width:0}
+.q-row .who b{display:block;font-size:12px}
+.q-row .who span{display:block;color:#666;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.q-row .facts{color:#8b949e;font-size:10px;margin-top:2px}
+.q-row .facts.hot{color:#b3261e;font-weight:bold}
+.facts-row{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 8px}
+.fact{display:flex;align-items:center;gap:5px;border:1px solid #d9ded4;background:#fff;
+  padding:2px 7px;font-size:10.5px;color:#3d4450}
+.fact b{color:#8b949e;font-weight:bold;letter-spacing:.5px}
+.fact.hot{border-color:#b3261e;color:#b3261e}
+.ctx-meter{display:inline-block;width:40px;height:6px;background:#e7e6dc;border:1px solid #c9c8bc;position:relative}
+.ctx-meter i{position:absolute;inset:0 auto 0 0;background:#4d8bf0}
+.ctx-meter.hot i{background:#b3261e}
+.q-row .age{font-weight:bold;color:#c62828;font-size:12px}
+.q-row .age.ok{color:#2e7d32;font-weight:normal;font-size:11px}
+.repo-grp{margin-bottom:7px}
+.repo-hd{display:flex;align-items:center;gap:7px;padding:5px 6px;cursor:pointer;
+  border:2px solid #1a1a1a;background:#fff;box-shadow:2px 2px 0 #1a1a1a;user-select:none}
+.repo-hd:hover{background:#fffbe6}
+.repo-grp.open .repo-hd{margin-bottom:5px}
+.caret{font-size:9px;width:9px;color:#555}
+.repo-pc{font-size:9px;color:#0648C0;border:1px solid #0648C0;border-radius:3px;
+  padding:0 4px;margin-left:6px}
+.repo-pc:hover{background:#0648C0;color:#fff}
+.repo-hd b{font-size:12px;letter-spacing:.5px}
+.repo-hd:hover b{text-decoration:underline}
+.repo-n{font-size:10px;color:#777}
+.repo-b{margin-left:auto;order:9;background:#c62828;color:#fff;font-size:9px;font-weight:bold;
+  padding:1px 6px;border-radius:8px}
+.repo-grp .q-row{margin-bottom:4px}
+/* sessions that died with cmux: a checklist above the agent list (public/js/restore.js) */
+.restore{border:2px solid #0648C0;background:#e8f0fe;box-shadow:2px 2px 0 #0648C0;
+  padding:8px;margin-bottom:10px}
+.rs-hd{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.rs-hd b{font-size:12px;letter-spacing:1px;color:#0648C0}
+.rs-hd span{font-size:11px;color:#3d4450}
+.rs-row{display:flex;gap:8px;align-items:center;padding:5px 7px;border:2px solid #1a1a1a;
+  background:#fff;margin-bottom:4px;cursor:pointer;font-size:12px}
+.rs-row:hover{background:#fffbe6}
+.rs-row input{width:auto;flex:none;margin:0;accent-color:#0648C0}
+.rs-row .who{flex:1;min-width:0}
+.rs-row .who b{display:block;font-size:12px}
+.rs-row .who span{display:block;color:#666;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rs-row .facts{color:#8b949e;font-size:10px;margin-top:2px}
+.restore .btns{margin:8px 0 0}
+.q-row.st-row-ASLEEP img,.q-row.st-row-FAINTED img{opacity:.55}
+.q-row.st-row-ASLEEP,.q-row.st-row-FAINTED{background:#f4f3ec}
+.hd{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;
+  border-bottom:2px solid #1a1a1a;padding-bottom:6px;margin-bottom:8px}
+.hd b{font-size:14px}
+.st-BLOCKED{color:#c62828;font-weight:bold}.st-WORKING{color:#1b5e20;font-weight:bold}
+.st-ASLEEP{color:#666;font-weight:bold}.st-FAINTED{color:#c62828;font-weight:bold}
+.st-THINKING{color:#8a6100;font-weight:bold}
+.sec{margin:10px 0;font-size:12px}
+.lbl{font-size:10px;letter-spacing:1px;font-weight:bold;color:#555;display:block;margin-bottom:3px}
+.q{background:#fff;border-left:4px solid #1a1a1a;padding:8px 10px;white-space:pre-wrap;font-size:12px;
+  max-height:230px;overflow-y:auto}
+.tools{font-size:11px;color:#333;white-space:pre-wrap;line-height:1.5}
+textarea,select,input{width:100%;font:12px "Courier New",monospace;border:2px solid #1a1a1a;padding:6px;background:#fff}
+textarea{height:78px;resize:vertical}
+.btns{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.pathrow{display:flex;gap:6px}.pathrow input{flex:1;min-width:0}.pathrow button{flex:0 0 auto}
+button{font:bold 11px "Courier New",monospace;border:2px solid #1a1a1a;background:#fff;
+  padding:6px 10px;cursor:pointer;box-shadow:2px 2px 0 #1a1a1a}
+button:hover{background:#fffbe6}
+button:active{transform:translate(2px,2px);box-shadow:none}
+button.danger{color:#c62828;border-color:#c62828;box-shadow:2px 2px 0 #c62828}
+/* Armed: the next click ends something. It has to look different from every other
+   button on the panel, because the click after it is the one with no undo. */
+button.armed{background:#c62828;color:#fff;border-color:#c62828;box-shadow:2px 2px 0 #7f1d1d}
+button.armed:hover{background:#a91d1d}
+button.wide{flex:1}
+/* the clipboard: square, no label, sits at the end of the action row */
+button.icon{padding:5px 8px;font-size:13px;line-height:1;margin-left:auto}
+.muted{color:#777;font-size:11px}
+.empty{text-align:center;color:#777;font-size:12px;padding:26px 10px;line-height:1.7}
+pre.screen{font-size:10px;line-height:1.3;background:#111;color:#cfc;padding:8px;overflow:auto;max-height:300px}
+#panel-toggle,#feed-toggle{font:bold 10px "Courier New",monospace;border:1px solid #6b7280;
+  background:transparent;color:inherit;padding:1px 5px;cursor:pointer;box-shadow:none;flex-shrink:0}
+#panel-toggle{color:#fff}
+#panel-toggle:hover,#feed-toggle:hover{background:rgba(255,255,255,.15)}
+/* Above the status bar, not behind it. The bar is 26px tall, fixed to the bottom and
+   sits at z-index 40, so a toast at bottom:12px/z-20 was posted straight into the one
+   strip of screen that is always covered. */
+#toast{position:fixed;bottom:38px;left:12px;max-width:min(560px,calc(100% - 24px));
+  background:#1a1a1a;color:#fff;font-size:11px;line-height:1.45;
+  padding:7px 12px;z-index:60;display:none;border-left:3px solid #4d8bf0}
+#toast.bad{background:#3a1512;border-left-color:#ff6b60;color:#ffd9d5}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="panel">
+    <div id="panel-head">
+      <button id="panel-back" title="Back" hidden>←</button>
+      <b>POKECLAUDE</b>
+      <span id="blocked-pill" class="zero">0</span>
+      <button id="panel-toggle" title="Collapse">▶</button>
+    </div>
+    <div id="panel-body"></div>
+    <div id="attachments"></div>
+    <div id="composer">
+      <input type="file" id="composer-file" multiple hidden>
+      <button id="composer-clip" title="Attach a file or screenshot" disabled>+</button>
+      <textarea id="composer-input" rows="1" placeholder="Pick a Pokémon to talk to…" disabled></textarea>
+      <button id="composer-send" disabled>➤</button>
+    </div>
+    <div id="panel-foot"><span class="key"><b class="k-ask">···</b> done, waiting on you   <b class="k-warn">!</b> over 5m   <b class="k-warn">!!</b> over 30m   <b class="k-zzz">z</b> finished   <b class="k-think">···</b> thinking   <b class="k-ball">●</b> subagents</span>
+Arrows/WASD move · Space talk · Tab next blocked · N new agent · Esc back</div>
+  </div>
+  <div id="drag"></div>
+  <div id="stage-col">
+  <div id="stage"><canvas id="game"></canvas><div id="tooltip"></div>
+    <div id="filter-ctl">
+      <button id="filter-btn" title="Show or hide repos">FILTER <span id="filter-count">ALL</span></button>
+      <div id="filter-menu"></div>
+    </div>
+    <div id="grid-ctl">
+      <button data-grid="3">3&times;3</button><button data-grid="4">4&times;4</button><button data-grid="5">5&times;5</button>
+    </div>
+    <div id="zoom-ctl">
+      <button id="zoom-out" title="Zoom out ( - )">−</button>
+      <span id="zoom-pct" class="auto">200%</span>
+      <button id="zoom-in" title="Zoom in ( + )">+</button>
+    </div>
+  </div>
+  <div id="auth-bar" title="Logins on this Mac"></div>
+  </div>
+  <div id="feed-wrap">
+    <div class="feed-hd"><button id="feed-toggle" title="Collapse">▶</button><span>ACTIVITY</span></div>
+    <div id="feed"></div>
+  </div>
+</div>
+<div id="statusbar">
+  <span class="sb-group" id="sb-fleet"></span>
+  <span class="sb-sep"></span>
+  <span class="sb-group" id="sb-svc"></span>
+  <span class="sb-spacer"></span>
+  <span class="sb-group" id="sb-usage"></span>
+  <span class="sb-sep"></span>
+  <span class="sb-group" id="sb-view"></span>
+</div>
+<div id="toast"></div>
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>
