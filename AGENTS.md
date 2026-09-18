@@ -506,10 +506,19 @@ Never import upward.
   a big screen squeezes the field out of existence on a small one.
 - The auth strip (`src/server/auth.js`, `public/js/authbar.js`) asks each tool's OWN
   status command and shows what it said: `gws-cli auth status -a`, `gh auth status`,
-  `gcloud auth print-access-token --account` (listing alone proves nothing: both
-  gcloud accounts were listed and both had lapsed), Slack `auth.test`, `claude auth
-  status`. `gh` prints to stderr and exits 1 when any account is bad, so both streams
-  are parsed. The sample is every 10 minutes, off the poll's await chain, and a probe
+  `vercel` `whoami`, Slack `auth.test`, `claude auth status`, `codex login status`.
+  Listing alone proves nothing, so each account is probed rather than counted. `gh`
+  prints to stderr and exits 1 when any account is bad, so both streams are parsed.
+  Vercel puts its version banner on stderr and the username on stdout, and
+  `codex login status` answers in a sentence rather than JSON.
+- AUTH_GROUPS in auth.js is the single list of what is probed, and GROUPS in authbar.js
+  the list of what is drawn. They are pinned together by a test: a group in one and not
+  the other is either probed and never shown, or labelled and never filled.
+- No probe is configured with an account name. Each asks the tool what IT is signed
+  into, so the strip works on anyone's machine and names nobody's accounts. A CLI is
+  found through `bin()`: POKECLAUDE_<TOOL>_BIN, then ~/.local/bin, then PATH. Never
+  hardcode an install path here; it was ~/.local/bin/gws-cli once, and that is exactly
+  the kind of thing that only works on the machine it was written on. The sample is every 10 minutes, off the poll's await chain, and a probe
   that hangs reports `ok: null`, never blocks. A red chip's fix runs in a NEW cmux
   tab, because every sign-in opens a browser and needs a person; `fixFor()` is the one
   list of those commands. The strip is a flex sibling under `#stage` inside

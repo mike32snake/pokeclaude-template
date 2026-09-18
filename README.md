@@ -271,14 +271,30 @@ local. Only the answer itself runs through the Claude Code CLI on the Max subscr
 **This is the only feature here that spends tokens.** Summarising and searching are local.
 
 ## Logins
-A thin strip under the field lists every login on this Mac and whether it still works:
-the gws-cli Google accounts, the gh GitHub accounts, gcloud, the Slack user token the
-skills post with, and Claude Code itself. Each chip is green, red or grey (could not
-tell). The headline says how many need a sign-in and how old the check is; click it to
-check again. Hover a chip for the tool's own message. Click a **red** chip and a cmux tab
-opens running that tool's sign-in command (`gws-cli auth login -a <account> --force`,
-`gcloud auth login <you@example.com>`, ...), since every one of them needs a browser. Slack has
-no CLI: its token is a file to update. The check runs every 10 minutes from the server
+A thin strip under the field lists every login on this machine and whether it still
+works. Six tools, and it only shows the ones you actually have:
+
+| Group | Asks | Signs back in with |
+|---|---|---|
+| Google | `gws-cli auth status -a <account>`, one chip per account in your own `gws_config.json` | `gws-cli auth -a <account>` |
+| GitHub | `gh auth status`, one chip per account | `gh auth login -h github.com` |
+| Vercel | `vercel` `whoami` | `vercel login` |
+| Slack | `auth.test` with a user token | a token to paste, no CLI |
+| Claude | `claude auth status` | `claude auth login` |
+| Codex | `codex login status` | `codex login` |
+
+Nothing here is configured with an account name: each probe asks the tool what it is
+signed into, so the strip shows your accounts, not anyone else's. A tool that is not
+installed is left out rather than shown red. The Slack chip appears only if
+`SLACK_USER_TOKEN` (or `SLACK_TOKEN`) is set, or `POKECLAUDE_OAUTH_FILE` points at a
+JSON file holding one. A CLI somewhere unusual can be named with
+`POKECLAUDE_GWS_CLI_BIN`, `POKECLAUDE_VERCEL_BIN` and so on.
+
+Each chip is green, red or grey (could not tell). The headline says how many need a
+sign-in and how old the check is; click it to check again. Hover a chip for the tool's
+own message. Click a **red** chip and a cmux tab opens running that tool's sign-in
+command, since every one of them needs a browser. The browser is your system default;
+`POKECLAUDE_BROWSER` picks another. The check runs every 10 minutes from the server
 (`src/server/auth.js`) and never blocks the poll.
 
 ## Filter

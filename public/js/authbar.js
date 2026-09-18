@@ -2,10 +2,14 @@
 // grouped by tool, coloured by whether it still works. Pure functions here so a test
 // can read the strip; the DOM is mounted in main.js.
 
+// Must stay in step with AUTH_GROUPS in src/server/auth.js, which decides which probes
+// run. A group missing here is probed and then never drawn. tests/auth.test.js pins the
+// two lists together; the client cannot import a server module, so it cannot share one.
 const GROUPS = [
-  ['google', 'Google'], ['github', 'GitHub'], ['gcloud', 'gcloud'],
-  ['slack', 'Slack'], ['claude', 'Claude'],
+  ['google', 'Google'], ['github', 'GitHub'], ['vercel', 'Vercel'],
+  ['slack', 'Slack'], ['claude', 'Claude'], ['codex', 'Codex'],
 ];
+export const CHIP_GROUPS = GROUPS;
 
 const cls = (ok) => ok === true ? 'ok' : ok === false ? 'bad' : 'unknown';
 

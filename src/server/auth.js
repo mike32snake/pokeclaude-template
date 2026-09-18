@@ -1,12 +1,14 @@
 // The logins on this machine, and whether each one still works: Google accounts in
-// gws-cli, GitHub accounts in gh, gcloud, a Slack user token, and Claude Code itself.
-// When one of them lapses the failure shows up somewhere else as a cron that stopped
-// or a skill that errored, and which account it was is a hunt. The strip at the bottom
-// of the field answers that at a glance. A tool you do not have reports grey rather
-// than failing, so the strip is useful with any subset of them installed.
+// gws-cli, GitHub accounts in gh, Vercel, a Slack user token, and the two agent CLIs,
+// Claude Code and Codex. When one of them lapses the failure shows up somewhere else
+// as a cron that stopped or a skill that errored, and which account it was is a hunt.
+// The strip at the bottom of the field answers that at a glance.
 //
-// Everything here shells out to the real CLIs and reads their own status commands,
-// so what the strip says is what the tool itself would say. Nothing is stored.
+// Nothing here names an account. Every probe asks the tool what IT is signed into, so
+// the strip shows whatever this machine has, and a tool that is not installed reports
+// grey rather than failing. Everything shells out to the real CLIs and reads their own
+// status commands, so what the strip says is what the tool itself would say. Nothing
+// is stored.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,15 +16,46 @@ import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const HOME = os.homedir();
-const GWS = path.join(HOME, '.local/bin/gws-cli');
-const GWS_CONFIG = path.join(HOME, '.config/gws-cli/gws_config.json');
-const CLAUDE = path.join(HOME, '.local/bin/claude');
-// Optional: a JSON file holding a Slack user token, so the auth strip can show whether
-// Slack is still signed in. Point POKECLAUDE_OAUTH_FILE at yours, or leave it unset and
-// the Slack chip simply reports that it cannot tell. Read for that one check, and never
-// sent anywhere but Slack.
-const OAUTH_FILE = process.env.POKECLAUDE_OAUTH_FILE
-  || path.join(HOME, '.config/pokeclaude/oauth-credentials.json');
+
+// The order the strip shows them in, and the only list that decides which probes run.
+export const AUTH_GROUPS = [
+  { key: 'google', label: 'Google' },
+  { key: 'github', label: 'GitHub' },
+  { key: 'vercel', label: 'Vercel' },
+  { key: 'slack',  label: 'Slack'  },
+  { key: 'claude', label: 'Claude' },
+  { key: 'codex',  label: 'Codex'  },
+];
+
+// Where a CLI lives is a property of the machine, not of this project. POKECLAUDE_<X>_BIN
+// wins, then the common user install, then PATH. execFile takes no shell, so a bare name
+// is a real PATH lookup and a shell function or alias is invisible to it either way.
+export function bin(name, env = process.env) {
+  const key = 'POKECLAUDE_' + name.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_BIN';
+  if (env[key]) return env[key];
+  const local = path.join(env.HOME || HOME, '.local/bin', name);
+  try { if (fs.existsSync(local)) return local; } catch { /* unreadable home: use PATH */ }
+  return name;
+}
+
+const gwsConfigPath = (env = process.env) =>
+  env.POKECLAUDE_GWS_CONFIG || path.join(env.HOME || HOME, '.config/gws-cli/gws_config.json');
+
+// A Slack user token, if the machine has one. An env var is the portable way; the JSON
+// file is a convenience for people who already keep one. Read for this one check and
+// never sent anywhere but Slack. Without it the Slack chip simply does not appear.
+export function slackToken(env = process.env, readFile = readOauthFile) {
+  if (env.SLACK_USER_TOKEN) return env.SLACK_USER_TOKEN;
+  if (env.SLACK_TOKEN) return env.SLACK_TOKEN;
+  const d = readFile(env);
+  return d?.slack?.token || d?.slack?.botToken || d?.token || null;
+}
+
+function readOauthFile(env = process.env) {
+  const file = env.POKECLAUDE_OAUTH_FILE
+    || path.join(env.HOME || HOME, '.config/pokeclaude/oauth-credentials.json');
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
 
 // ---------- parsers: pure, tested ----------
 
@@ -70,11 +103,25 @@ export function parseGh(text) {
   return out;
 }
 
-export function parseGcloudToken({ stdout, stderr }) {
-  if (String(stdout || '').trim()) return { ok: true, note: 'Token issued' };
-  const err = String(stderr || '').split('\n').map(l => l.trim()).find(l => /^ERROR/.test(l));
-  if (err) return { ok: false, note: err.replace(/^ERROR:\s*\([^)]*\)\s*/, '') };
-  return { ok: null, note: String(stderr || '').trim().slice(0, 200) || 'no output' };
+// `vercel whoami` prints the username on stdout and its own version banner on stderr.
+// No login is an error line, not an empty answer, so the two are told apart.
+export function parseVercel({ stdout, stderr, err } = {}) {
+  const name = String(stdout || '').split('\n').map(l => l.trim())
+    .filter(Boolean).filter(l => !/^Vercel CLI/i.test(l)).pop();
+  if (name) return { ok: true, note: name };
+  const bad = String(stderr || '').split('\n').map(l => l.trim())
+    .find(l => /^(Error|Error!)/i.test(l));
+  if (bad) return { ok: false, note: bad.replace(/^Error!?:?\s*/i, '') };
+  return { ok: null, note: String(stderr || err || '').trim().slice(0, 200) || 'no answer' };
+}
+
+// `codex login status` answers in a sentence, not JSON: "Logged in using ChatGPT".
+export function parseCodex(text) {
+  const line = String(text || '').split('\n').map(l => l.trim()).find(Boolean);
+  if (!line) return { ok: null, note: 'no answer' };
+  if (/^logged in/i.test(line)) return { ok: true, note: line };
+  if (/not logged in|no credentials|run .?codex login/i.test(line)) return { ok: false, note: line };
+  return { ok: null, note: line.slice(0, 200) };
 }
 
 export function parseSlack(text) {
@@ -105,9 +152,10 @@ const shellQuote = value => "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
 export function fixFor({ group, name }) {
   if (group === 'google') return `gws-cli auth -a ${shellQuote(name)}`;
   if (group === 'github') return 'gh auth login -h github.com';
-  if (group === 'gcloud') return `gcloud auth login ${shellQuote(name)} --no-activate --force`;
+  if (group === 'vercel') return 'vercel login';
   if (group === 'claude') return 'claude auth login';
-  return null;
+  if (group === 'codex') return 'codex login';
+  return null;   // slack is a token to paste, not a CLI to run
 }
 
 // The UI is launching an interactive sign-in, not declaring authentication success.
@@ -120,7 +168,7 @@ export function loginShell(row) {
     `export BROWSER=${shellQuote(browser)} GH_BROWSER=${shellQuote(browser)} CLOUDSDK_BROWSER=${shellQuote(browser)}`,
     // claude auth is still a Claude subprocess: never inherit the server identity.
     `for pc_env in $(env | sed -n 's/\\(CMUX_[A-Za-z0-9_]*\\)=.*/\\1/p'); do unset "$pc_env"; done`,
-    `printf '%s\\012' ${shellQuote(`PokeClaude: sign in to ${row.group} / ${row.name} in Brave. This tab is the login progress.`)}`,
+    `printf '%s\\012' ${shellQuote(`PokeClaude: sign in to ${row.group} / ${row.name} in your browser. This tab is the login progress.`)}`,
     command,
     'pc_auth_exit=$?',
     `if [ "$pc_auth_exit" -eq 0 ]; then printf '%s\\012' 'Sign-in command completed. PokeClaude will verify the account.'; else printf '%s\\012' "PokeClaude sign-in failed (exit $pc_auth_exit). Review the error above."; fi`,
@@ -153,10 +201,11 @@ const missing = (r) => r.err && r.err.code === 'ENOENT';
 
 async function probeGoogle() {
   let cfg = null;
-  try { cfg = JSON.parse(fs.readFileSync(GWS_CONFIG, 'utf8')); } catch { return []; }
+  try { cfg = JSON.parse(fs.readFileSync(gwsConfigPath(), 'utf8')); } catch { return []; }
   const accounts = googleAccounts(cfg);
+  const gws = bin('gws-cli');
   return Promise.all(accounts.map(async (a) => {
-    const r = await run(GWS, ['auth', 'status', '-a', a.name]);
+    const r = await run(gws, ['auth', 'status', '-a', a.name]);
     const p = missing(r) ? { ok: null, note: 'gws-cli not installed' }
             : timedOut(r) ? { ok: null, note: 'timed out' } : parseGws(r.stdout || r.stderr);
     return { id: `google:${a.name}`, group: 'google', name: a.name, isDefault: a.isDefault, ...p };
@@ -164,29 +213,22 @@ async function probeGoogle() {
 }
 
 async function probeGithub() {
-  const r = await run('gh', ['auth', 'status']);
+  const r = await run(bin('gh'), ['auth', 'status']);
   if (missing(r)) return [];
   if (timedOut(r)) return [{ id: 'github:?', group: 'github', name: 'gh', ok: null, note: 'timed out' }];
   // gh writes status to stderr and exits 1 when any account is bad; both streams hold accounts.
   return parseGh(r.stdout + '\n' + r.stderr).map(a => ({ id: `github:${a.name}`, group: 'github', ...a }));
 }
 
-async function probeGcloud() {
-  const list = await run('gcloud', ['auth', 'list', '--format=json']);
-  if (missing(list) || timedOut(list)) return [];
-  let rows = [];
-  try { rows = JSON.parse(list.stdout); } catch { return []; }
-  return Promise.all(rows.map(async (row) => {
-    const r = await run('gcloud', ['auth', 'print-access-token', '--account', row.account]);
-    const p = timedOut(r) ? { ok: null, note: 'timed out' } : parseGcloudToken(r);
-    return { id: `gcloud:${row.account}`, group: 'gcloud', name: row.account,
-             active: row.status === 'ACTIVE', ...p };
-  }));
+async function probeVercel() {
+  const r = await run(bin('vercel'), ['whoami']);
+  if (missing(r)) return [];
+  const p = timedOut(r) ? { ok: null, note: 'timed out' } : parseVercel(r);
+  return [{ id: 'vercel:account', group: 'vercel', name: p.ok ? p.note : 'Vercel', ...p }];
 }
 
 async function probeSlack() {
-  let token = null;
-  try { token = JSON.parse(fs.readFileSync(OAUTH_FILE, 'utf8'))?.slack?.botToken; } catch { return []; }
+  const token = slackToken();
   if (!token) return [];
   const r = await run('curl', ['-s', '-m', '10', '-H', `Authorization: Bearer ${token}`,
                                'https://slack.com/api/auth.test']);
@@ -195,16 +237,24 @@ async function probeSlack() {
 }
 
 async function probeClaude() {
-  const r = await run(fs.existsSync(CLAUDE) ? CLAUDE : 'claude', ['auth', 'status']);
+  const r = await run(bin('claude'), ['auth', 'status']);
   if (missing(r)) return [];
   const p = timedOut(r) ? { ok: null, note: 'timed out' } : parseClaude(r.stdout);
   return [{ id: 'claude:code', group: 'claude', name: 'Claude Code', ...p }];
 }
 
+async function probeCodex() {
+  const r = await run(bin('codex'), ['login', 'status']);
+  if (missing(r)) return [];
+  const p = timedOut(r) ? { ok: null, note: 'timed out' } : parseCodex(r.stdout || r.stderr);
+  return [{ id: 'codex:cli', group: 'codex', name: 'Codex', ...p }];
+}
+
 // Every login, in the order the strip shows them. Probes run side by side; one that
 // hangs is reported as unknown, never allowed to hold up the rest.
 export async function probeAuth() {
-  const groups = await Promise.all([probeGoogle(), probeGithub(), probeGcloud(), probeSlack(), probeClaude()]);
+  const groups = await Promise.all([probeGoogle(), probeGithub(), probeVercel(),
+                                    probeSlack(), probeClaude(), probeCodex()]);
   const rows = groups.flat().map(r => ({ ...r, fix: r.ok === false ? fixFor(r) : null }));
   return { at: Date.now(), rows, ...summarize(rows) };
 }
