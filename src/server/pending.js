@@ -43,10 +43,17 @@ export function pendingPrompt(screen) {
   const raw = String(screen ?? '').split('\n');
   if (!raw.length) return null;
 
-  // Work down to the composer: what is being asked sits above it.
+  // Work down to the composer: what is being asked sits above it. The composer is the
+  // prompt INSIDE the input box, straight under its rule. Every message you have sent
+  // is echoed into the scrollback as "❯ your words" too, and taking the latest of
+  // those for the input box threw away everything under it: the whole question. So
+  // does a multi-select's cursor on its unnumbered Submit row.
   let end = raw.length;
   for (let i = raw.length - 1; i >= 0; i--) {
-    if (isComposer(raw[i])) { end = i; break; }
+    if (!isComposer(raw[i])) continue;
+    let k = i - 1;
+    while (k >= 0 && !raw[k].trim()) k--;
+    if (k >= 0 && BOX_EDGE.test(raw[k])) { end = i; break; }
   }
   const above = raw.slice(0, end);
 
@@ -106,9 +113,10 @@ const BOX_BODY = /^\s*[│┃|╭╰]|^\s*[☐☑✔✓]\s/;
 // The strip across the top of a multi-question ask: one tab per question, ticked as
 // each is answered, with a Submit at the end. It is navigation, and it was being read
 // as the first sentence of the question.
-const TAB = /[☐☑⊠□✔✓]\s*([^☐☑⊠□✔✓←→]+)/g;
+// An answered question is drawn ☒, which is easy to miss next to ☑.
+const TAB = /[☐☑☒⊠□✔✓]\s*([^☐☑☒⊠□✔✓←→]+)/g;
 const isTabBar = (line) => {
-  const glyphs = (line.match(/[☐☑⊠□✔✓]/g) || []).length;
+  const glyphs = (line.match(/[☐☑☒⊠□✔✓]/g) || []).length;
   return glyphs >= 2 || (glyphs >= 1 && /[←→]/.test(line));
 };
 function readTabs(line) {
@@ -119,14 +127,18 @@ function readTabs(line) {
     if (!label) continue;
     // Submit is the button you press when every question is answered, not a question.
     if (/^submit$/i.test(label)) { submit = true; continue; }
-    tabs.push({ label, done: /[☑⊠✓]/.test(m[0][0]) });
+    tabs.push({ label, done: /[☑☒⊠✓]/.test(m[0][0]) });
   }
   return { tabs, submit };
 }
 
-// A multi-select draws its state in front of the answer: "[ ]" or "[x]". That is the
-// tick, not the first three characters of what you are choosing.
-const CHECK = /^\[([ xX])\]\s*/;
+// A multi-select draws its state in front of the answer: "[ ]", and "[✔]" once ticked
+// ("[x]" in older builds). That is the tick, not the start of what you are choosing.
+const CHECK = /^\[([ xX✔✓])\]\s*/;
+// A multi-select ends its answers with a Submit row that has no number. It is the only
+// way off the question, so the panel has to be able to reach it: it becomes option 0.
+// The tab strip's "✔ Submit" is not it; that one sits on a line of tabs.
+const SUBMIT_ROW = /^\s*([❯▶>›]?)\s*Submit\s*$/;
 // The terminal adds two rows of its own to every picker. Neither is an answer: one
 // opens a text input, the other drops out of the question into ordinary chat, and
 // clicking them from the panel has to do something different.
@@ -138,13 +150,20 @@ export function parseAsk(lines) {
   if (!rows.length) return null;
 
   const opts = [];
+  let lastN = 0;
   for (let i = 0; i < rows.length; i++) {
+    const row = rows[i].match(SUBMIT_ROW);
+    if (row && opts.length) {
+      opts.push({ n: 0, selected: !!row[1], label: 'Submit', kind: 'submit', at: i, indent: 0 });
+      continue;
+    }
     const m = rows[i].match(OPTION);
     if (!m) continue;
     const n = Number(m[3]);
     // Ascending, but NOT necessarily 1, 2, 3: a real picker skips numbers, and
     // insisting on a run dropped the last options off every question.
-    if (opts.length && n <= opts[opts.length - 1].n) continue;
+    if (n <= lastN) continue;
+    lastN = n;
     opts.push({ n, selected: !!m[2], label: m[4].trim(), at: i, indent: m[1].length + 3 });
   }
   // One option is a sentence that happens to start with "1."; a picker has a choice.
@@ -187,6 +206,7 @@ export function parseAsk(lines) {
   // The tick comes off the label and becomes state the panel can draw itself.
   let multi = false;
   for (const o of opts) {
+    if (o.kind === 'submit') continue;
     const m = o.label.match(CHECK);
     if (m) { multi = true; o.checked = m[1] !== ' '; o.label = o.label.replace(CHECK, '').trim(); }
     o.kind = extraKind(o.label);
@@ -194,9 +214,12 @@ export function parseAsk(lines) {
   // Only the real answers carry a tick. The terminal's own two rows never do, and
   // marking them as unchecked would invite the panel to try to toggle them.
   if (!multi) for (const o of opts) delete o.checked;
+  for (const o of opts) if (o.kind !== 'option') delete o.checked;
+  // A bare "Submit" line under a single-select is prose, not a row to press.
+  const options = (multi ? opts : opts.filter(o => o.kind !== 'submit'))
+    .map(({ at, indent, ...o }) => o);
 
-  return { header, question, tabs, submit, multi,
-           options: opts.map(({ at, indent, ...o }) => o) };
+  return { header, question, tabs, submit, multi, options };
 }
 
 // How to get the cursor from where it is to the option you clicked.

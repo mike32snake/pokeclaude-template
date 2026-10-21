@@ -27,7 +27,9 @@ export function parsePs(text) {
     const m = line.match(/^\s*(\d+)\s+(\S+)\s+(.*)$/);
     if (!m) continue;
     const [, pid, tty, cmd] = m;
-    if (tty === '??' || tty === '-' || !/\/claude(\s|$)/.test(cmd)) continue;
+    // The program is claude by full path (cmux) or by bare name off the PATH (a native
+    // pen). Only the first word counts, so "vim claude-notes.md" is not it.
+    if (tty === '??' || tty === '-' || !/^(\S*\/)?claude(\s|$)/.test(cmd)) continue;
     // --session-id is the session it created; --resume is the one it continued into,
     // and Claude Code appends to that same transcript, so both name the right file.
     const sid = (cmd.match(new RegExp(`--session-id\\s+(${UUID})`)) ||

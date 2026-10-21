@@ -12,6 +12,7 @@ import path from 'node:path';
 // server would be a second copy of the one thing that must agree with what you are
 // looking at: the Pokemon in the notification has to be the Pokemon on the pen.
 import { DEX } from '../../public/js/dex.js';
+import { proofLabel } from '../../public/js/proof.js';
 
 const MIN = 60 * 1000;
 
@@ -28,12 +29,11 @@ export function cronTrouble(job, now = Date.now()) {
 
 export const penName = (dir) => (dir ? path.basename(dir) : 'unmapped');
 
-// The same hash the client uses in public/js/world.js, so a workspace gets the same
-// Pokemon here as it does on the field. tests/notify.test.js imports the client's hash
-// and checks the two agree, so the copy cannot drift.
-const hash = (s) => { let h = 0; for (const c of String(s)) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; };
-export function speciesFor(workspaceId) {
-  const [dex, name] = DEX[hash(workspaceId + 'v2') % DEX.length];
+// The DEX index snapshot() gave this agent, which is the one the field draws. Taken
+// from the snapshot rather than recomputed, so the two cannot disagree.
+export function speciesFor(index) {
+  if (index == null || !DEX[index]) return null;
+  const [dex, name] = DEX[index];
   return { dex, name };
 }
 
@@ -59,9 +59,13 @@ const SOUND = { 'needs-you': 'Glass', died: 'Basso', 'cron-failed': 'Basso', 'cr
 // What the notification actually reads like: who, where, what happened, and what it
 // was doing. An agent alert is named for its Pokemon and its repo, because that is how
 // you find it on the field; a cron has neither, so it is named for the job.
-export function describe({ kind, species, pen, label, detail } = {}) {
+export function describe({ kind, species, pen, label, detail, verify } = {}) {
   const title = species ? `${species.name} · ${pen || 'unmapped'}` : (label || 'cron');
-  return { title, subtitle: SAID[kind] || kind, body: summarise(detail, 110), sound: SOUND[kind] };
+  // "Finished" is a claim. Say whether the agent proved it, so an unproved one is the
+  // one you open first.
+  const proof = kind === 'finished' ? proofLabel(verify) : null;
+  const subtitle = (SAID[kind] || kind) + (proof ? ` · ${proof}` : '');
+  return { title, subtitle, body: summarise(detail, 110), sound: SOUND[kind] };
 }
 
 // Which transitions are worth an interruption. The watcher says only WHAT happened and
@@ -69,7 +73,8 @@ export function describe({ kind, species, pen, label, detail } = {}) {
 // so the caller does that for the one or two agents that actually changed, never for
 // the whole field on every broadcast.
 function alertFor(prev, a) {
-  const at = { workspaceId: a.workspaceId, key: a.workspaceId, dir: a.dir, title: a.title };
+  const at = { workspaceId: a.workspaceId, key: a.workspaceId, dir: a.dir, title: a.title,
+               verify: a.verify || null, species: a.species ?? null };
   if (a.status === 'BLOCKED') return { ...at, kind: 'needs-you' };
   if (a.status === 'FAINTED') return { ...at, kind: 'died' };
   if (a.status === 'ASLEEP' && ['WORKING', 'THINKING', 'BLOCKED'].includes(prev))

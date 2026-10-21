@@ -6,11 +6,15 @@ import { md } from './markdown.js';
 import { allJobs, untilText, agoText, CRON_DIR } from './crons.js';
 import { makeDrafts } from './drafts.js';
 import { makeAttachments, filesFromDrop } from './attach.js';
+import { renderRun, rowsText } from './termview.js';
 import { threadKey, atBottom, nextTop, openTop } from './thread.js';
 import { sessionReport } from './report.js';
 import { makeArm, ARM_WINDOW } from './arm.js';
 import { resolvePick, modelsFor, remember, remembered } from './engines.js';
 import { restoreModel, restoreKey } from './restore.js';
+import { step, countLabel, mergeTail, markAll, clearMarks } from './find.js';
+import { titleMatches, highlight } from './pcsearch.js';
+import { proofLabel } from './proof.js';
 
 const body = document.getElementById('panel-body');
 
@@ -131,7 +135,8 @@ const toastEl = document.getElementById('toast');
 
 let mode = 'queue';          // queue | agent | pc | spawn | crons
 let current = null;          // selected actor
-let pcRows = [], pcSel = 0, pcPlot = null;
+let pcRows = [], pcSel = 0, pcPlot = null, pcMore = false, pcLoading = false;
+const PC_PAGE = 12;
 let world = null, hooks = {};
 let lastRenderKey = '';
 const expanded = new Set();          // plot ids the user has opened; collapsed by default
@@ -206,7 +211,7 @@ export function renderQueue(force = false) {
 
   const key = all.map(a => a.id + a.agent.status + a.agent.since).join()
     + '|' + (current?.id || '') + '|' + mode + '|' + [...expanded].sort().join(',')
-    + '|' + restoreKey(state.restore, restoreOff);
+    + '|' + restoreKey(state.restore, restoreOff) + '|' + (state.backend || '');
   if (!force && key === lastRenderKey) return;
   lastRenderKey = key;
   if (mode === 'queue') renderList(all);
@@ -256,9 +261,12 @@ function renderList(all) {
         ag.branch ? `⑂ ${ag.branch}${ag.gitDirty ? '*' : ''}` : null,
         ag.model || null,
         ag.contextPct != null ? `${ag.contextPct}% ctx` : null,
+        // Only once it has stopped: "verified" is a claim about a finished turn.
+        st === 'ASLEEP' ? proofLabel(ag.verify) : null,
       ].filter(Boolean).join('  ·  ');
       const hot = isCron ? BROKEN.has(ag.cron.state)
-        : ag.contextPct != null && ag.contextPct >= 80;
+        : (ag.contextPct != null && ag.contextPct >= 80)
+          || (st === 'ASLEEP' && ag.verify?.state === 'unverified');
       return `<div class="q-row st-row-${st}" data-id="${esc(ac.id)}">
         <span class="sp">${isSvc ? '<span class="svc-ico">▤</span>' : `<img src="${sprite(ac)}" alt="">`}</span>
         <span class="who"><b>${esc(species)}</b><span>${esc(
@@ -328,7 +336,7 @@ function restoreCard() {
   if (!lost.length) return '';
   const { rows, picked } = restoreModel(lost, restoreOff, signFor);
   return `<div class="restore">
-    <div class="rs-hd"><b>CMUX RESTARTED</b><span>${rows.length} session${rows.length === 1 ? '' : 's'} stopped with it</span></div>
+    <div class="rs-hd"><b>${state.backend === 'native' ? 'SESSIONS STOPPED' : 'CMUX RESTARTED'}</b><span>${rows.length} session${rows.length === 1 ? '' : 's'} ${state.backend === 'native' ? 'are no longer running' : 'stopped with it'}</span></div>
     ${rows.map(r => `<label class="rs-row"><input type="checkbox" data-sid="${esc(r.id)}" ${r.checked ? 'checked' : ''}>
       <span class="who"><b>${esc(r.sign)}</b><span>${esc(r.title)}</span>
       <span class="facts">${r.engine}  ·  ${esc(r.was)}</span></span></label>`).join('')}
@@ -413,6 +421,7 @@ function setComposer(on, placeholder, key = null) {
 export async function openAgent(actor, move = false) {
   hooks.reveal?.();
   mode = 'agent'; current = actor;
+  whole = null; archivedRow = null;
   setBack(back, 'Back to all agents');
   expanded.add(actor.plot.plot);          // leaving the chat lands on an open group
   lastRepoDir = actor.plot.rawDir;
@@ -554,6 +563,7 @@ let lastRepoDir = null;
 // Ash's answers, so the way back is whoever opened it.
 async function openArchived(row, backTo = openArchive, backLabel = 'Back to the archive') {
   mode = 'archived';
+  whole = null; archivedRow = row;
   setBack(backTo, backLabel);
   body.classList.add('term-mode');
   body.innerHTML = `<div class="t-head"><div class="hd"><b>${esc(row.sign)}</b>
@@ -565,11 +575,146 @@ async function openArchived(row, backTo = openArchive, backLabel = 'Back to the 
   if (mode !== 'archived') return;
   body.querySelector('.term').innerHTML =
     renderThread(messages) || '<div class="t-note">This session has no readable turns.</div>';
+  applyFind({ jump: true });
+  if (findOn) loadWhole();
   body.querySelector('#ar-resume').onclick = async () => {
     await api.act({ action: 'resume', dir: row.dir, sessionId: row.sessionId, engine: row.engine });
     toast('resuming in a new tab…'); back();
   };
 }
+
+// ---------- find in a conversation (Cmd+F) ----------
+// The browser's own find sees only what is drawn, and the pane draws the opening ask
+// plus the newest turns. PokeClaude.app has no find at all. This one reads the whole
+// conversation before it says "no matches".
+const findBar = document.getElementById('findbar');
+const findInput = document.getElementById('find-q');
+const findCount = document.getElementById('find-count');
+let findOn = false, findMarks = [], findAt = 0, findTimer = null;
+let whole = null, wholeLoading = false, archivedRow = null;
+
+// Only a conversation can be searched. Every other view keeps the browser's find.
+const findRoot = () => (mode === 'agent' || mode === 'archived') ? body.querySelector('.term') : null;
+
+function showCurrent(scroll) {
+  findMarks.forEach((m, i) => m.classList.toggle('cur', i === findAt));
+  if (scroll) findMarks[findAt]?.scrollIntoView({ block: 'center' });
+  findCount.textContent = wholeLoading ? 'reading all turns…'
+    : countLabel(findAt, findMarks.length, findInput.value);
+}
+
+// `jump` is a new query: go to the first match at or below the top of the view, or to
+// the newest one when they are all above. Without it this is a redraw, and the current
+// match must stay the current match. A live refresh adds turns at the end, so the
+// index holds; reading the whole conversation adds them above, so `keep: 'end'` counts
+// from the end.
+function applyFind({ jump = false, keep = 'start' } = {}) {
+  const root = findRoot();
+  if (!findOn || !root) return;
+  const fromEnd = findMarks.length - findAt;
+  findMarks = markAll(root, findInput.value, '.terminal-controls');
+  const n = findMarks.length;
+  if (jump) {
+    const top = body.getBoundingClientRect().top + (body.querySelector('.t-head')?.offsetHeight || 0);
+    const i = findMarks.findIndex(m => m.getBoundingClientRect().top >= top);
+    findAt = i < 0 ? Math.max(0, n - 1) : i;
+  } else {
+    findAt = Math.max(0, Math.min(n - 1, keep === 'end' ? n - fromEnd : findAt));
+  }
+  showCurrent(jump);
+}
+
+function stepFind(dir) {
+  findAt = step(findAt, findMarks.length, dir);
+  showCurrent(true);
+}
+
+async function loadWhole() {
+  if (whole || wholeLoading) return;
+  const where = mode, actor = current, row = archivedRow;
+  const tp = where === 'agent' ? lastDetail?.transcriptPath : row?.path;
+  if (!tp) return;
+  wholeLoading = true; showCurrent(false);
+  const r = await api.transcript(tp, true).catch(() => null);
+  wholeLoading = false;
+  if (!findOn || mode !== where || current !== actor || archivedRow !== row || !r?.messages?.length) {
+    return showCurrent(false);
+  }
+  whole = r.messages;
+  // The terminal controls live inside the thread; a redraw would close them. The whole
+  // conversation is kept and the next redraw shows it.
+  if (body.querySelector('.terminal-controls')) return showCurrent(false);
+  // Older turns arrive ABOVE the reader, so hold the distance from the end.
+  const had = findMarks.length, fromEnd = body.scrollHeight - body.scrollTop;
+  if (where === 'agent') {
+    renderChat(actor, lastDetail, { keepScroll: { wasAtBottom: false, prevTop: 0 }, findKeep: 'end' });
+  } else {
+    body.querySelector('.term').innerHTML = renderThread(whole);
+    applyFind({ keep: 'end' });
+  }
+  body.scrollTop = body.scrollHeight - fromEnd;
+  if (!had && findMarks.length) { findAt = findMarks.length - 1; showCurrent(true); }
+}
+
+function openFind() {
+  hooks.reveal?.();
+  findOn = true; findBar.hidden = false;
+  findInput.focus(); findInput.select();
+  applyFind({ jump: true });
+  loadWhole();
+}
+function closeFind(refocus = false) {
+  if (!findOn) return;
+  findOn = false; findBar.hidden = true; findMarks = []; findAt = 0;
+  clearTimeout(findTimer); findTimer = null;
+  clearMarks(body);
+  if (refocus && !input.disabled) input.focus();
+}
+// Leaving the conversation closes the bar. Every view replaces the body's children, so
+// that is the one place to notice, instead of a call in each of a dozen openers.
+new MutationObserver(() => { if (findOn && !findRoot()) closeFind(); })
+  .observe(body, { childList: true });
+
+findInput.addEventListener('input', () => {
+  clearTimeout(findTimer);
+  findTimer = setTimeout(() => { findTimer = null; applyFind({ jump: true }); }, 120);
+});
+findInput.addEventListener('keydown', (e) => {
+  e.stopPropagation();                                   // it is a text field, not the map
+  if (e.key === 'Escape') { e.preventDefault(); closeFind(true); }
+  if (e.key !== 'Enter') return;
+  e.preventDefault();
+  // Enter inside the typing pause searches for what was typed; it must not step
+  // through the matches of the previous query.
+  if (findTimer) { clearTimeout(findTimer); findTimer = null; applyFind({ jump: true }); }
+  else stepFind(e.shiftKey ? -1 : 1);
+});
+document.getElementById('find-prev').onclick = () => stepFind(-1);
+document.getElementById('find-next').onclick = () => stepFind(1);
+document.getElementById('find-close').onclick = () => closeFind(true);
+
+async function focusArchiveSearch() {
+  if (mode !== 'archive') await openArchive();
+  const q = body.querySelector('#ar-q');
+  q?.focus(); q?.select();
+}
+
+// On the capture phase, because the composer usually has the focus in a chat and
+// main.js gives a focused input the whole keyboard. Cmd on a Mac only: Ctrl+F in a
+// macOS text box moves the cursor.
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
+addEventListener('keydown', (e) => {
+  if (!(isMac ? e.metaKey : e.ctrlKey) || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === 'f' && !e.shiftKey) {
+    if (findRoot()) openFind();
+    else if (mode === 'queue' || mode === 'archive') focusArchiveSearch();
+    else if (mode === 'pc') focusPCSearch();
+    else return;
+  } else if (k === 'g' && findOn) stepFind(e.shiftKey ? -1 : 1);
+  else return;
+  e.preventDefault(); e.stopImmediatePropagation();
+}, true);
 
 // A service is a running process, not a conversation: show what it serves and give
 // the actions that make sense for it.
@@ -606,18 +751,18 @@ function renderService(actor) {
     <div class="sec"><span class="lbl">LISTENING ON</span>
       ${ports.length
         ? ports.map(p => `<div class="q-row" data-port="${p}"><span class="who">
-            <b>localhost:${p}</b><span>open in Brave</span></span></div>`).join('')
+            <b>localhost:${p}</b><span>open in browser</span></span></div>`).join('')
         : '<div class="q">No port bound yet.</div>'}</div>
     <div class="sec"><span class="lbl">NOTE</span><div class="q">This workspace is a running
       process, not a Claude agent. It has no transcript, and stopping it stops the service.</div></div>
-    <div class="btns"><button id="sv-back">← ALL</button><button id="sv-open">OPEN TAB</button>
+    <div class="btns"><button id="sv-back">← ALL</button><button id="sv-open">${state.backend === 'native' ? 'TERMINAL' : 'OPEN TAB'}</button>
       <button id="sv-raw">RAW</button><button id="sv-stop" class="danger">STOP</button>
       <button id="sv-copy" class="icon" title="Copy this service">📋</button></div>`;
   setComposer(false, 'Service · no conversation');
   body.querySelectorAll('.q-row[data-port]').forEach(el => {
     el.onclick = () => window.open(`http://localhost:${el.dataset.port}`, '_blank');
   });
-  body.querySelector('#sv-open').onclick = () => api.act({ action: 'open', ws: a.workspaceId });
+  body.querySelector('#sv-open').onclick = () => openTab(a.workspaceId);
   body.querySelector('#sv-copy').onclick = () => copySession(actor, {});
   body.querySelector('#sv-raw').onclick = async () => {
     const s2 = await api.screen(a.workspaceId);
@@ -653,6 +798,10 @@ function renderPending(p) {
   const opts = (ask.options || []).map(o => {
     // The terminal's own two rows are not answers. "Type something" opens an input
     // that only the terminal can take, so saying so beats a click that does nothing.
+    // A multi-select's own Submit row: the only way off the question, so it is a button.
+    if (o.kind === 'submit') {
+      return `<button class="ask-opt live ask-submit${o.selected ? ' on' : ''}" data-opt="0" data-label="Submit"><b>SUBMIT</b></button>`;
+    }
     if (o.kind === 'text' || o.kind === 'chat') {
       return `<button class="ask-opt live" data-opt="${o.n}" data-label="${esc(o.label)}"><b>${esc(o.label)}</b></button>`;
     }
@@ -663,11 +812,10 @@ function renderPending(p) {
       <b>${box}${esc(o.label)}</b>${o.description ? `<span>${esc(o.description)}</span>` : ''}</div>`;
   }).join('');
 
-  // Ticking is not answering. A multi-select stays on screen until it is submitted,
-  // and the panel cannot press Submit yet, so it must not imply that a click finished
-  // anything: that silence is exactly what made this feel broken.
+  // Ticking is not answering. A multi-select stays on screen until SUBMIT is pressed,
+  // so the hint says so rather than implying a tick finished anything.
   const hint = ask.multi
-    ? 'Click to tick and untick. Use Terminal controls to move between questions and submit.'
+    ? 'Click to tick and untick, then SUBMIT.'
     : 'Click an answer, or press its number in the terminal';
   return `<div class="ask ask-pending"><div class="ask-badge">WAITING ON YOU</div>
     ${tabs}
@@ -684,7 +832,7 @@ function wireAskOptions(workspaceId, actor) {
   // of failing quietly. Clicking "Type something" and having nothing happen is worse
   // than being sent where the typing actually works.
   body.querySelectorAll('.ask-opt.extra').forEach(el => {
-    el.onclick = () => { api.act({ action: 'open', ws: workspaceId }); toast('opened the tab'); };
+    el.onclick = () => openTab(workspaceId);
   });
   body.querySelectorAll('.ask-opt.live').forEach(el => {
     const tick = el.classList.contains('tick');
@@ -771,13 +919,19 @@ function renderChat(actor, d, opts = {}) {
         ${ctxPct}%${ctxTok != null ? ` <span class="muted">${Math.round(ctxTok / 1000)}k</span>` : ''}
         <span class="ctx-meter ${ctxPct >= 80 ? 'hot' : ''}"><i style="width:${ctxPct}%"></i></span></span>` : ''}
       ${(d.permissionMode || a.permissionMode) ? `<span class="fact"><b>mode</b>${esc(d.permissionMode || a.permissionMode)}</span>` : ''}
+      ${a.status === 'ASLEEP' && proofLabel(a.verify) ? `<span class="fact ${a.verify.state === 'unverified' ? 'hot' : ''}"
+        title="From your Stop hook: did the agent check its work after its last edit?"><b>proof</b>${esc(proofLabel(a.verify))}</span>` : ''}
     </div>
     <div class="btns"><button id="b-detail">${detailMode ? 'SUMMARY' : 'DETAIL'}</button>
-      <button id="b-open">OPEN TAB</button><button id="b-screen">TERMINAL CONTROLS</button>
+      ${state.backend === 'native' ? '' : '<button id="b-open">OPEN TAB</button>'}<button id="b-screen">TERMINAL CONTROLS</button>
       <button id="b-pc">PC</button><button id="b-kill" class="danger">KILL</button>
       <button id="b-copy" class="icon" title="Copy this session — everything an agent needs to QA it">📋</button></div></div>`;
 
-  const msgs = renderThread(d.messages);
+  // Once find has read the whole conversation the pane keeps showing it, and a live
+  // refresh is folded in. Dropping back to the trimmed thread would throw the reader
+  // off the match they had just found.
+  if (whole) whole = mergeTail(whole, d.messages);
+  const msgs = renderThread(whole || d.messages);
   const queued = (d.outbox || []).map(row => `<div class="t-user"><b>${row.status === 'review' ? 'Delivery needs review' : 'Queued'}</b><p>${esc(row.text)}</p>${row.reason ? `<div class="muted">${esc(row.reason)}</div>` : ''}<button data-cancel-reply="${esc(row.id)}">${row.status === 'review' ? 'Dismiss' : 'Cancel queued reply'}</button></div>`).join('');
 
   // A question the agent is waiting on goes at the BOTTOM, under the conversation,
@@ -816,7 +970,7 @@ function renderChat(actor, d, opts = {}) {
     try { localStorage.setItem('pc.detail', detailMode ? '1' : '0'); } catch {}
     renderChat(actor, d);
   };
-  body.querySelector('#b-open').onclick = () => api.act({ action: 'open', ws: a.workspaceId });
+  body.querySelector('#b-open')?.addEventListener('click', () => openTab(a.workspaceId));
   body.querySelector('#b-copy').onclick = () => copySession(actor, d);
   body.querySelector('#b-pc').onclick = () => openPC(actor.plot);
   armButton(body.querySelector('#b-kill'), `kill:${a.workspaceId}`, 'KILL',
@@ -826,28 +980,91 @@ function renderChat(actor, d, opts = {}) {
       if (!r?.error) back();
     });
   body.querySelector('#b-screen').onclick = () => showTerminal(a.workspaceId);
+  applyFind({ keep: opts.findKeep });
 }
 
 
 // A deliberate fallback for pickers, custom answers, slash menus, and terminal drafts.
 // The main chat draft stays untouched. Every keystroke is checked against this screen.
+// A cmux pen has a tab to bring forward. A native pen has only our own terminal, and
+// the server says so rather than launching an app that holds none of the pens.
+async function openTab(ws) {
+  const r = await api.act({ action: 'open', ws });
+  if (r.useTerminal) return showTerminal(ws);
+  toast('opened the tab');
+}
+
 async function showTerminal(ws) {
   if (current?.agent?.workspaceId !== ws) return;
   body.querySelector('.terminal-controls')?.remove();
+  const native = state.backend === 'native';
   const el = document.createElement('div'); el.className = 'terminal-controls stuck';
   el.innerHTML = `<b>Terminal controls</b><p>Review the live screen. Type inserts one line; Enter submits or confirms the selected choice. Your chat draft stays saved.</p>
-    <pre class="screen"></pre><div class="btns"><button data-refresh>Refresh</button><button data-close>Close controls</button><button data-open>Open in cmux</button></div>
+    <pre class="screen${native ? ' live' : ''}"></pre><div class="btns">${native ? '<span class="t-live">● live</span>' : '<button data-refresh>Refresh</button>'}<button data-close>Close controls</button>${native ? '' : '<button data-open>Open in cmux</button>'}</div>
     <div class="btns">${[['up','↑'],['down','↓'],['left','←'],['right','→'],['space','Space / toggle'],['tab','Tab'],['shift+tab','Shift+Tab'],['escape','Escape / cancel'],['enter','Enter / confirm'],['backspace','Backspace'],['ctrl+a','Start of line'],['ctrl+e','End of line'],['ctrl+k','Delete to end'],['ctrl+u','Delete to start']].map(([key,label]) => `<button data-key="${key}">${label}</button>`).join('')}</div>
     <div class="btns"><input aria-label="Text to type into the terminal" placeholder="Custom answer or terminal text" autocomplete="off"><button data-type>Type without submitting</button></div><p class="muted" data-result></p>`;
   (body.querySelector('.term') || body).append(el);
   let screen = null;
   const pre = el.querySelector('pre'), status = el.querySelector('[data-result]');
   const busy = on => el.querySelectorAll('button, input').forEach(b => b.disabled = on);
+
+  // Two ways to fill that <pre>, and only one of them is new.
+  //
+  // A cmux pen is asked for its screen as text, because cmux renders it and all we get
+  // is the text. A native pen is OURS: the rows arrive as they change, in colour, and
+  // the page patches the ones that moved. That is what replaces having a cmux window
+  // to look at - the terminal is on screen, live, next to the field.
+  let stream = null, rows = [];
+  // Only the rows that have something on them. Claude Code's classic renderer paints at
+  // the TOP of a fifty-row screen and leaves the rest blank, so drawing all fifty and
+  // scrolling to the bottom showed a black box - which is what it did until I looked at
+  // it. The same reason toText counts back from the last row of CONTENT.
+  const lastContentRow = () => {
+    for (let y = rows.length - 1; y >= 0; y--) {
+      if ((rows[y]?.runs || []).some(r => r.text.trim())) return y;
+    }
+    return -1;
+  };
+  const paint = (changed) => {
+    const last = lastContentRow();
+    while (pre.children.length > last + 1) pre.lastChild.remove();
+    while (pre.children.length < last + 1) pre.appendChild(document.createElement('div'));
+    // A row that scrolled into view for the first time has never been drawn, so on a
+    // partial update the newly-added divs are filled too.
+    const fill = new Set(changed.map(r => r.y));
+    for (let y = 0; y <= last; y++) {
+      const line = pre.children[y];
+      if (!line) continue;
+      if (fill.has(y) || !line.innerHTML) {
+        // renderRun escapes before it styles; terminal output is never markup.
+        line.innerHTML = (rows[y]?.runs || []).map(renderRun).join('') || '&nbsp;';
+      }
+    }
+    // The guard the server checks every action against has to be the string the server
+    // itself would produce, so it is derived from the same rows (termview.rowsText).
+    screen = rowsText(rows, 50);
+  };
   const refreshScreen = async () => {
     const r = await api.screen(ws).catch(() => ({ error: 'Could not read the terminal' }));
     screen = r.screen || null; pre.textContent = screen || r.error || '(blank screen)';
     pre.scrollTop = pre.scrollHeight;
   };
+  const live = () => {
+    stream = new EventSource(`/api/term?ws=${encodeURIComponent(ws)}`);
+    stream.onmessage = (e) => {
+      const d = JSON.parse(e.data);
+      if (d.full) rows = d.rows;
+      else {
+        for (const y of d.removed.slice().sort((a, b) => b - a)) rows.splice(y, 1);
+        for (const r of d.rows) rows[r.y] = r;
+      }
+      paint(d.full ? rows : d.rows);
+    };
+    // A dropped stream must not leave a stale screen that actions are checked against.
+    stream.onerror = () => { el.querySelector('.t-live')?.replaceChildren('○ reconnecting'); };
+    stream.onopen = () => { el.querySelector('.t-live')?.replaceChildren('● live'); };
+  };
+
   const act = async request => {
     busy(true);
     try {
@@ -855,17 +1072,25 @@ async function showTerminal(ws) {
       status.textContent = r.ok ? 'Key sent. Review the updated screen before the next action.' : r.error || 'Action failed';
       if (r.ok && request.text) el.querySelector('input').value = '';
       await new Promise(resolve => setTimeout(resolve, 150));
-      await refreshScreen();
+      // A live screen updates itself; a polled one has to be asked again.
+      if (!native) await refreshScreen();
     } catch { status.textContent = 'Connection lost. Refresh before trying again.'; screen = null; }
     finally { busy(false); }
   };
   el.querySelectorAll('[data-key]').forEach(b => b.onclick = () => act({ key: b.dataset.key }));
   el.querySelector('[data-type]').onclick = () => act({ text: el.querySelector('input').value });
   el.querySelector('input').onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') e.preventDefault(); };
-  el.querySelector('[data-refresh]').onclick = async () => { busy(true); await refreshScreen(); busy(false); };
-  el.querySelector('[data-close]').onclick = () => el.remove();
-  el.querySelector('[data-open]').onclick = () => api.act({ action: 'open', ws });
-  busy(true); await refreshScreen(); busy(false);
+  el.querySelector('[data-refresh]')?.addEventListener('click', async () => { busy(true); await refreshScreen(); busy(false); });
+  el.querySelector('[data-close]').onclick = () => { stream?.close(); el.remove(); };
+  el.querySelector('[data-open]')?.addEventListener('click', () => openTab(ws));
+  // The stream holds a connection open, so it must go when the panel does.
+  new MutationObserver((_, obs) => {
+    if (!el.isConnected) { stream?.close(); obs.disconnect(); }
+  }).observe(body, { childList: true, subtree: true });
+
+  busy(true);
+  if (native) live(); else await refreshScreen();
+  busy(false);
   if (el.isConnected) el.scrollIntoView({ block: 'nearest' });
 }
 
@@ -957,34 +1182,103 @@ input.addEventListener('input', () => {
 sendBtn.addEventListener('click', sendCurrent);
 
 // ---------- the PC ----------
+// The list is drawn into #pc-list and #pc-foot, never over the search box, so the box
+// keeps its focus and caret while results arrive.
 export async function openPC(plot) {
   hooks.reveal?.();
   mode = 'pc'; pcPlot = plot; pcSel = 0; lastRepoDir = plot.rawDir; body.classList.remove('term-mode');
+  pcQuery = ''; pcList = []; pcRows = []; pcMore = false; pcSearching = false; pcTotal = 0;
   setBack(back, 'Back to all agents');
-  setComposer(false, 'PC open · Esc to go back');
-  body.innerHTML = `<div class="hd"><b>${esc(plot.sign)} · PC</b></div><div class="muted">reading sessions…</div>`;
-  const { sessions } = await api.sessions(plot.rawDir);
-  if (mode !== 'pc') return;
-  pcRows = sessions; renderPC();
+  setComposer(false, 'PC open · type to search · Esc to go back');
+  body.innerHTML = `<div class="hd"><b>${esc(plot.sign)} · PC</b><span class="muted" id="pc-count">past sessions</span></div>
+    <div class="sec"><input id="pc-q" placeholder="Search past sessions…" autocomplete="off" spellcheck="false"></div>
+    <div id="pc-list"><div class="muted">reading sessions…</div></div><div id="pc-foot"></div>`;
+  wirePCSearch();
+  body.querySelector('#pc-q').focus({ preventScroll: true });   // typing searches at once
+  const { sessions, more } = await api.sessions(plot.rawDir, PC_PAGE);
+  if (mode !== 'pc' || pcPlot !== plot) return;
+  pcList = sessions; pcMore = !!more;
+  if (!pcQuery) pcRows = pcList;
+  renderPC();
+}
+// Older sessions come a page at a time. The server lists newest first, so asking for
+// a longer list keeps every row already shown and the selection on the same session.
+async function loadOlderPC() {
+  if (!pcMore || pcLoading || pcQuery) return;
+  const plot = pcPlot;
+  pcLoading = true; renderPC();
+  const r = await api.sessions(plot.rawDir, pcList.length + PC_PAGE).catch(() => null);
+  pcLoading = false;
+  if (mode !== 'pc' || pcPlot !== plot) return;
+  if (r) { pcList = r.sessions; pcMore = !!r.more; }
+  if (!pcQuery) pcRows = pcList;
+  renderPC();
+}
+// Search: the titles already loaded filter on the keystroke, then the server's answer
+// over every session in the repo replaces them. Only the newest request may land.
+let pcQuery = '', pcList = [], pcSearching = false, pcTotal = 0, pcSeq = 0, pcTimer = null, pcAbort = null;
+function wirePCSearch() {
+  const q = body.querySelector('#pc-q');
+  q.onkeydown = (e) => {
+    e.stopPropagation();
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter') { e.preventDefault(); pcKey(e); }
+    else if (e.key === 'Escape') { e.preventDefault(); if (q.value) { q.value = ''; searchPC(''); } else { q.blur(); back(); } }
+  };
+  q.oninput = () => searchPC(q.value);
+}
+function searchPC(raw) {
+  const q = raw.trim();
+  if (q === pcQuery) return;
+  pcQuery = q; pcSel = 0;
+  clearTimeout(pcTimer); pcAbort?.abort(); pcAbort = null;
+  const seq = ++pcSeq;
+  if (!q) { pcSearching = false; pcRows = pcList; renderPC(); return; }
+  pcRows = titleMatches(pcList, q); pcSearching = true; renderPC();
+  pcTimer = setTimeout(async () => {
+    const plot = pcPlot;
+    pcAbort = new AbortController();
+    const r = await api.searchSessions(plot.rawDir, q, { signal: pcAbort.signal }).catch(() => null);
+    if (seq !== pcSeq || mode !== 'pc' || pcPlot !== plot) return;
+    pcSearching = false;
+    if (r) { pcRows = r.sessions; pcTotal = r.total; }
+    pcSel = 0; renderPC();
+  }, 120);
+}
+function focusPCSearch() {
+  const q = body.querySelector('#pc-q');
+  q?.focus(); q?.select();
 }
 function renderPC() {
+  const list = body.querySelector('#pc-list'), foot = body.querySelector('#pc-foot');
+  if (!list || !foot) return;
   const live = new Set(state.agents.map(a => a.sessionId).filter(Boolean));
   const rows = pcRows.map((s, i) => {
     const d = new Date(s.mtime);
     return `<div class="q-row ${i === pcSel ? 'sel' : ''}" data-i="${i}">
-      <span class="who"><b>${esc(s.title)}</b>
-        <span>${engineTag(s)}${d.toLocaleString('en-US', { month: 'short' })} ${d.getDate()} · ${s.msgs} msgs${live.has(s.sessionId) ? ' · LIVE' : ''}</span></span>
+      <span class="who"><b>${pcQuery ? highlight(s.title, pcQuery) : esc(s.title)}</b>
+        <span>${engineTag(s)}${d.toLocaleString('en-US', { month: 'short' })} ${d.getDate()} · ${s.msgs} msgs${live.has(s.sessionId) ? ' · LIVE' : ''}</span>
+        ${pcQuery && s.snippet ? `<span class="snip">${highlight(s.snippet, pcQuery)}</span>` : ''}</span>
       </div>`;
   }).join('');
-  body.innerHTML = `<div class="hd"><b>${esc(pcPlot.sign)} · PC</b><span class="muted">past sessions</span></div>
-    ${rows || '<div class="empty">No past sessions here.</div>'}
-    <div class="btns"><button id="pc-go" class="wide">RESUME SELECTED</button></div>`;
-  body.querySelectorAll('.q-row').forEach(el => {
+  const empty = pcQuery ? (pcSearching ? 'searching…' : 'Nothing matched.') : 'No past sessions here.';
+  list.innerHTML = rows || `<div class="empty">${empty}</div>`;
+  const count = body.querySelector('#pc-count');
+  if (count) {
+    count.textContent = !pcQuery ? 'past sessions'
+      : pcSearching ? 'searching…'
+      : `${pcTotal} match${pcTotal === 1 ? '' : 'es'}${pcTotal > pcRows.length ? ` · top ${pcRows.length}` : ''}`;
+  }
+  foot.innerHTML = `${pcMore && !pcQuery ? `<div class="btns"><button id="pc-more" class="wide"${pcLoading ? ' disabled' : ''}>${pcLoading ? 'READING…' : 'LOAD OLDER'}</button></div>` : ''}
+    <div class="btns"><button id="pc-go" class="wide"${pcRows.length ? '' : ' disabled'}>RESUME SELECTED</button></div>`;
+  list.querySelectorAll('.q-row').forEach(el => {
     el.onclick = () => { pcSel = Number(el.dataset.i); renderPC(); };
     el.ondblclick = resumeSel;
   });
-  body.querySelector('#pc-go').onclick = resumeSel;
+  foot.querySelector('#pc-go').onclick = resumeSel;
+  const more = foot.querySelector('#pc-more');
+  if (more) more.onclick = loadOlderPC;
 }
+const showSel = () => body.querySelector('.q-row.sel')?.scrollIntoView({ block: 'nearest' });
 async function resumeSel() {
   const s = pcRows[pcSel]; if (!s) return;
   await api.act({ action: 'resume', dir: pcPlot.rawDir, sessionId: s.sessionId, engine: s.engine });
@@ -992,9 +1286,13 @@ async function resumeSel() {
 }
 export function pcKey(e) {
   if (mode !== 'pc') return false;
-  if (e.key === 'ArrowDown') { pcSel = Math.min(pcRows.length - 1, pcSel + 1); renderPC(); return true; }
-  if (e.key === 'ArrowUp') { pcSel = Math.max(0, pcSel - 1); renderPC(); return true; }
+  if (e.key === 'ArrowDown') {
+    if (pcSel >= pcRows.length - 1) { loadOlderPC(); return true; }
+    pcSel++; renderPC(); showSel(); return true;
+  }
+  if (e.key === 'ArrowUp') { pcSel = Math.max(0, pcSel - 1); renderPC(); showSel(); return true; }
   if (e.key === 'Enter') { resumeSel(); return true; }
+  if (e.key === '/') { focusPCSearch(); return true; }
   return false;
 }
 

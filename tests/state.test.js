@@ -137,3 +137,69 @@ test('the engine travels to the client, so the panel can say what a pen runs', (
   st.agents.get('U1').engine = 'codex';
   assert.equal(snapshot(st).agents[0].engine, 'codex');
 });
+
+// One hook serves both backends. cmux exports CMUX_WORKSPACE_ID and the pty relay
+// exports POKECLAUDE_AGENT_ID, so the hook sends both and the server takes whichever
+// arrived. Without this the switch would need the hook changed on the same day, and
+// the hook is the one thing on this machine that must never break.
+test('a hook event is matched by whichever id its backend gave it', () => {
+  const s = createState();
+  applyHook(s, { cmuxWorkspaceId: 'workspace:29', event: { hook_event_name: 'UserPromptSubmit' } });
+  assert.equal(s.agents.get('workspace:29').status, 'WORKING');
+
+  applyHook(s, { agentId: 'pc-abc-123', event: { hook_event_name: 'UserPromptSubmit' } });
+  assert.equal(s.agents.get('pc-abc-123').status, 'WORKING');
+
+  // An empty string is what the shell substitutes for a variable the other backend did
+  // not set, so it must not become an agent of its own.
+  applyHook(s, { cmuxWorkspaceId: '', agentId: 'pc-def-456', event: { hook_event_name: 'Stop' } });
+  assert.equal(s.agents.get('pc-def-456').status, 'ASLEEP');
+  assert.ok(!s.agents.has(''), 'an empty id must never become a pen');
+
+  const before = s.agents.size;
+  applyHook(s, { cmuxWorkspaceId: '', agentId: '', event: { hook_event_name: 'Stop' } });
+  assert.equal(s.agents.size, before, 'an event from nowhere creates nothing');
+});
+
+// The native backend reconciles a hook against the pen's own screen, so it needs the
+// hook's own claim, not a status the screen may have moved on from since.
+test('a hook records what it said, separately from the status in force', () => {
+  const s = createState();
+  applyHook(s, { agentId: 'pc-1', event: { hook_event_name: 'UserPromptSubmit' } });
+  assert.equal(s.agents.get('pc-1').lastHookStatus, 'WORKING');
+  applyHook(s, { agentId: 'pc-1', event: { hook_event_name: 'Stop' } });
+  assert.equal(s.agents.get('pc-1').lastHookStatus, 'ASLEEP');
+  assert.ok(s.agents.get('pc-1').lastHookAt > 0);
+});
+
+// The hook runs for EVERY Claude Code session on this machine, not only the pens. It
+// sends whichever id its host gave it: cmux exports CMUX_WORKSPACE_ID, the pty relay
+// exports POKECLAUDE_AGENT_ID. A session hosted by the other one is a stranger, and
+// taking its id created a pen with no terminal behind it that appeared on the field and
+// fainted a few seconds later - every time you typed in a terminal of your own.
+test('a hook from the other backend is ignored, not turned into a pen', () => {
+  const s = createState();
+  // Running natively: a cmux session firing hooks is not one of ours.
+  applyHook(s, { cmuxWorkspaceId: 'workspace:29', agentId: '',
+                 event: { hook_event_name: 'UserPromptSubmit' } }, Date.now(), 'native');
+  assert.equal(s.agents.size, 0);
+  applyHook(s, { cmuxWorkspaceId: '', agentId: 'pc-1',
+                 event: { hook_event_name: 'UserPromptSubmit' } }, Date.now(), 'native');
+  assert.equal(s.agents.get('pc-1')?.status, 'WORKING');
+
+  // And the other way round.
+  const c = createState();
+  applyHook(c, { cmuxWorkspaceId: '', agentId: 'pc-1',
+                 event: { hook_event_name: 'UserPromptSubmit' } }, Date.now(), 'cmux');
+  assert.equal(c.agents.size, 0);
+  applyHook(c, { cmuxWorkspaceId: 'workspace:29', agentId: '',
+                 event: { hook_event_name: 'UserPromptSubmit' } }, Date.now(), 'cmux');
+  assert.equal(c.agents.get('workspace:29')?.status, 'WORKING');
+});
+
+test('with no backend named, either id still works, as it always did', () => {
+  const s = createState();
+  applyHook(s, { cmuxWorkspaceId: 'workspace:29', event: { hook_event_name: 'Stop' } });
+  applyHook(s, { agentId: 'pc-1', event: { hook_event_name: 'Stop' } });
+  assert.equal(s.agents.size, 2);
+});

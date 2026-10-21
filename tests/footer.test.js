@@ -9,7 +9,12 @@
 // percentage is not on screen at all.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseFooter, contextWindow } from '../src/server/cmux.js';
+import { parseFooter, contextWindow, useLargeWindows } from '../src/server/cmux.js';
+
+// contextWindow reads which models have a 1M window off Claude Code's changelog on this
+// machine, so the tests supply their own set rather than whatever the CLI last cached.
+// Empty means "the name is all we have", which is what the label tests below are about.
+useLargeWindows(new Set());
 
 // Captured from a live 60-column cmux pane, ellipsis and all.
 const NARROW = [
@@ -76,9 +81,25 @@ test('a 1M model label means a million tokens of context', () => {
 });
 
 test('anything else is the standard window, including an unknown model', () => {
-  assert.equal(contextWindow('Opus 5'), 200_000);
+  assert.equal(contextWindow('Haiku 4.5'), 200_000);
   assert.equal(contextWindow('Sonnet 4.5'), 200_000);
   assert.equal(contextWindow(null), 200_000);
+});
+
+// The label tests above are the whole story only for a model whose name says "1M". Most
+// do not: Opus 5.5, Sonnet 5.5 and Opus 5 are 1M by default and Claude Code prints
+// nothing to say so, which measured a 107k Opus 5.5 session at 54% of a 200k window.
+// A regex of families here is what went stale, so the set comes from models.js instead.
+test('a model with a 1M window and nothing in its name to say so is still 1M', () => {
+  useLargeWindows(new Set(['opus 5.5', 'claude-opus-5-5', 'sonnet 5.5']));
+  assert.equal(contextWindow('Opus 5.5'), 1_000_000);
+  assert.equal(contextWindow(null, 'claude-opus-5-5'), 1_000_000);
+  assert.equal(contextWindow('Sonnet 5.5'), 1_000_000);
+  // Whole names, not substrings. Sonnet 5 is a 200k model and Sonnet 5.5 is not, and
+  // one name contains the other.
+  assert.equal(contextWindow('Sonnet 5'), 200_000);
+  assert.equal(contextWindow('Haiku 4.5'), 200_000);
+  useLargeWindows(new Set());
 });
 
 // Fable has no 200k variant: the million IS its default, so Claude Code prints no
@@ -116,14 +137,16 @@ test('a truncated footer still gets its context from the transcript', () => {
   assert.equal(f.permissionMode, 'bypass permissions');
 });
 
+// Haiku 4.5 rather than Opus 5, which used to stand in for "a 200k model" here and is
+// not one: Anthropic's changelog says claude-opus-5 shipped with a 1M window.
 test('the same token count is a much bigger share of a standard window', () => {
-  const f = agentFacts({ ...noTail, contextTokens: 107_003 }, { ...noFooter, model: 'Opus 5' });
+  const f = agentFacts({ ...noTail, contextTokens: 107_003 }, { ...noFooter, model: 'Haiku 4.5' });
   assert.equal(f.contextPct, 54);            // 107,003 of 200,000
 });
 
 test('a percentage the footer printed itself is trusted over our arithmetic', () => {
   const f = agentFacts({ ...noTail, contextTokens: 10_000 },
-                       { ...noFooter, model: 'Opus 5', contextPct: 22 });
+                       { ...noFooter, model: 'Haiku 4.5', contextPct: 22 });
   assert.equal(f.contextPct, 22);
 });
 
@@ -133,8 +156,8 @@ test('the mode falls back to the transcript when the footer never showed it', ()
 });
 
 test('a screen we could not read leaves what the transcript knows intact', () => {
-  const f = agentFacts({ model: 'claude-opus-5', contextTokens: 4000, permissionMode: 'plan' }, noFooter);
-  assert.equal(f.model, 'claude-opus-5');    // the id, until the footer offers a nicer name
+  const f = agentFacts({ model: 'claude-haiku-4-5', contextTokens: 4000, permissionMode: 'plan' }, noFooter);
+  assert.equal(f.model, 'claude-haiku-4-5');    // the id, until the footer offers a nicer name
   assert.equal(f.permissionMode, 'plan');
   assert.equal(f.contextPct, 2);
 });
@@ -151,7 +174,7 @@ test('nothing known reports nothing, so the bar shows a dash rather than a zero'
 // is not a full session: it is proof the window we assumed is the wrong one. Clamping
 // it to 100% is how a Fable agent with 388k of a million spare read as "about to die".
 test('a count past the assumed window means the window was assumed wrong', () => {
-  const f = agentFacts({ ...noTail, contextTokens: 236_000 }, { ...noFooter, model: 'Opus 5' });
+  const f = agentFacts({ ...noTail, contextTokens: 236_000 }, { ...noFooter, model: 'Haiku 4.5' });
   assert.equal(f.contextPct, 24);            // 236,000 of 1,000,000, not 118% clamped to 100
 });
 
@@ -161,7 +184,7 @@ test('the Fable agent that started this: 388k is a third of its window, not all 
 });
 
 test('past even the largest window we know, say nothing rather than lie', () => {
-  const f = agentFacts({ ...noTail, contextTokens: 1_400_000 }, { ...noFooter, model: 'Opus 5' });
+  const f = agentFacts({ ...noTail, contextTokens: 1_400_000 }, { ...noFooter, model: 'Haiku 4.5' });
   assert.equal(f.contextPct, null, 'a dash is honest; 100% is a warning that is not true');
   assert.equal(f.contextTokens, 1_400_000, 'the measurement itself is still worth showing');
 });

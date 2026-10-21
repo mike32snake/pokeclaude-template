@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PokeClaude native terminals</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>&#9646;</text></svg>">
+<style>
+  :root{color-scheme:dark;--paper:#0b0d10;--ink:#c5c5c5;--edge:#232830;--accent:#7cc7ff;--warn:#e8a33d}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);
+       font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+  header{display:flex;gap:12px;align-items:center;padding:10px 14px;border-bottom:1px solid var(--edge);
+         position:sticky;top:0;background:var(--paper);flex-wrap:wrap}
+  h1{font-size:13px;margin:0;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+  .muted{color:#6b7280}
+  select,button,input{font:inherit;background:#12161c;color:var(--ink);border:1px solid var(--edge);
+                      border-radius:4px;padding:5px 9px}
+  button{cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  main{padding:14px}
+  pre#screen{margin:0;padding:12px;background:#000;border:1px solid var(--edge);border-radius:6px;
+             white-space:pre;overflow:auto;min-height:60vh;line-height:1.25;font-size:12px}
+  pre#screen div{min-height:1.25em}
+  .bar{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+  .bar input[type=text]{flex:1;min-width:240px}
+  .tag{border:1px solid var(--edge);border-radius:999px;padding:2px 9px;font-size:11px}
+  .ghost{color:var(--warn)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Native terminals</h1>
+  <select id="agents"><option value="">no agents</option></select>
+  <button id="spawn">New Claude pen</button>
+  <button id="kill">Close pen</button>
+  <span class="tag" id="stat">idle</span>
+  <span class="muted">PokeClaude itself is untouched on :5180</span>
+</header>
+<main>
+  <pre id="screen">attach an agent…</pre>
+  <div class="bar">
+    <input type="text" id="line" placeholder="type into the composer — Enter inserts the text, it does not submit">
+    <button data-key="enter">Enter</button>
+    <button data-key="escape">Esc</button>
+    <button data-key="up">↑</button>
+    <button data-key="down">↓</button>
+    <button data-key="tab">Tab</button>
+    <button data-key="backspace">⌫</button>
+    <button data-key="ctrl+c">Ctrl-C</button>
+  </div>
+  <div class="bar"><span class="muted">composer:</span> <span id="draft" class="muted">—</span></div>
+</main>
+<script type="module">
+import { renderRows, renderRun } from './js/termview.js';
+
+const $ = (id) => document.getElementById(id);
+let current = null, stream = null;
+
+const post = (path, body) =>
+  fetch(path, { method: 'POST', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify(body) }).then(r => r.json());
+
+async function refresh() {
+  const { agents } = await fetch('/api/agents').then(r => r.json());
+  const sel = $('agents');
+  const had = sel.value;
+  // Built as elements, never as an HTML string. None of this is ours to trust: the id
+  // and cwd come off disk, where any relay can write them, and a pen can set its own
+  // window title to whatever it likes with one printf.
+  const option = (value, label) => {
+    const o = document.createElement('option');
+    o.value = value;
+    o.textContent = label;
+    return o;
+  };
+  sel.replaceChildren(...(agents.length
+    ? agents.map(a => option(a.id, `${a.id} · ${(a.current_directory || '').split('/').pop()}`))
+    : [option('', 'no agents')]));
+  if (agents.some(a => a.id === had)) sel.value = had;
+  if (!current && agents.length) { sel.value = agents[0].id; attach(agents[0].id); }
+  $('stat').textContent = `${agents.length} agent${agents.length === 1 ? '' : 's'}`;
+}
+
+function attach(id) {
+  if (stream) stream.close();
+  current = id;
+  if (!id) { $('screen').textContent = 'attach an agent…'; return; }
+  stream = new EventSource(`/api/screen?id=${encodeURIComponent(id)}`);
+  stream.onmessage = (e) => {
+    const d = JSON.parse(e.data);
+    // One <div> per row, patched in place. Rebuilding the whole screen on every frame
+    // is what froze the tab. The innerHTML here is safe for one reason only: renderRun
+    // escapes the text BEFORE it wraps any styling round it (termview.js, tested), so
+    // terminal output can never become markup. Nothing else on this page builds HTML
+    // from a string.
+    const screen = $('screen');
+    if (d.full) {
+      screen.replaceChildren(...d.rows.map(r => {
+        const el = document.createElement('div');
+        el.innerHTML = (r.runs || []).map(renderRun).join('') || '&nbsp;';
+        return el;
+      }));
+    } else {
+      for (const y of d.removed) screen.children[y]?.remove();
+      for (const r of d.rows) {
+        while (screen.children.length <= r.y) screen.appendChild(document.createElement('div'));
+        screen.children[r.y].innerHTML = (r.runs || []).map(renderRun).join('') || '&nbsp;';
+      }
+    }
+    document.title = d.title || 'PokeClaude native terminals';
+    $('draft').textContent = d.draft.ghost
+      ? '(empty — that is Claude Code’s own suggestion, not a draft)'
+      : (d.draft.draft || '(empty)');
+    $('draft').className = d.draft.ghost ? 'ghost' : 'muted';
+  };
+}
+
+$('agents').onchange = (e) => attach(e.target.value);
+$('spawn').onclick = async () => {
+  $('stat').textContent = 'starting…';
+  const r = await post('/api/spawn', {
+    cwd: new URLSearchParams(location.search).get('cwd') || undefined,
+    command: 'claude --dangerously-skip-permissions',
+  });
+  await refresh();
+  if (r.ref) { $('agents').value = r.ref; attach(r.ref); }
+};
+$('kill').onclick = async () => { if (current) { await post('/api/close', { id: current }); current = null; await refresh(); } };
+$('line').onkeydown = async (e) => {
+  if (e.key !== 'Enter' || !current) return;
+  e.preventDefault();
+  const text = e.target.value;
+  e.target.value = '';
+  await post('/api/input', { id: current, literal: text });
+};
+for (const b of document.querySelectorAll('button[data-key]')) {
+  b.onclick = () => current && post('/api/input', { id: current, key: b.dataset.key });
+}
+refresh();
+setInterval(refresh, 3000);
+</script>
+</body>
+</html>

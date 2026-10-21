@@ -270,3 +270,60 @@ test('mergeSessions interleaves both engines newest first and keeps the limit', 
   assert.deepEqual(mergeSessions(claude, codex, 2).map(r => r.path), ['c1', 'x1']);
   assert.deepEqual(mergeSessions(claude, codex, 5).map(r => r.engine), ['claude', 'codex', 'claude']);
 });
+
+// Find reads the WHOLE conversation. The chat pane is trimmed to the opening ask and
+// the newest turns, so a search over what the pane holds says "no matches" for a word
+// that is in the transcript.
+test('readConversation can return every turn, with no gap marker', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-whole-'));
+  const dir = path.join(home, '.claude', 'projects', 'x');
+  fs.mkdirSync(dir, { recursive: true });
+  const p = path.join(dir, 's.jsonl');
+  const lines = [{ type: 'user', message: { content: 'the opening ask' } }];
+  for (let i = 0; i < 120; i++) {
+    lines.push({ type: 'assistant', message: { content: [{ type: 'text', text: 'turn ' + i }] } });
+  }
+  fs.writeFileSync(p, lines.map(l => JSON.stringify(l)).join('\n') + '\n');
+  assert.equal(readConversation(p, 40, { home }).length, 40, 'the pane stays trimmed');
+  const all = readConversation(p, 40, { home, whole: true });
+  assert.equal(all.length, 121);
+  assert.ok(!all.some(t => t.role === 'gap'));
+  assert.equal(all[60].text, 'turn 59', 'the middle is there');
+  fs.rmSync(home, { recursive: true, force: true });
+});
+
+// The PC lists a repo's past sessions a page at a time. It asks for one row past the
+// page, so it knows whether an older page exists without counting every transcript.
+test('pageSessions trims to the limit and says whether older sessions remain', async () => {
+  const { pageSessions } = await import('../src/server/transcripts.js');
+  const rows = [{ mtime: 3 }, { mtime: 2 }, { mtime: 1 }];
+  assert.deepEqual(pageSessions(rows, 2), { sessions: rows.slice(0, 2), more: true });
+  assert.deepEqual(pageSessions(rows.slice(0, 2), 2), { sessions: rows.slice(0, 2), more: false });
+});
+
+test('sessionLimit defaults to 12 and caps a large ask', async () => {
+  const { sessionLimit } = await import('../src/server/transcripts.js');
+  assert.equal(sessionLimit(null), 12);
+  assert.equal(sessionLimit('abc'), 12);
+  assert.equal(sessionLimit('36'), 36);
+  assert.equal(sessionLimit('99999'), 1000);
+});
+
+// The PC search reads every transcript in a repo. It keeps what was said, by either
+// side, and skips tool calls and their output, which is most of a transcript's bytes.
+test('searchText keeps what was said and skips tool traffic', async () => {
+  const { searchText } = await import('../src/server/transcripts.js');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-stext-'));
+  const p = path.join(home, 's.jsonl');
+  fs.writeFileSync(p, [
+    JSON.stringify({ type: 'user', message: { content: 'deploy the site' } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Deploying now.' },
+      { type: 'tool_use', name: 'Bash', input: { command: 'vercel deploy' } }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 't',
+      content: [{ type: 'text', text: 'BUILD LOG secret noise' }] }] } }),
+    JSON.stringify({ type: 'attachment', attachment: { type: 'queued_command', prompt: 'also fix the footer' } }),
+    JSON.stringify({ type: 'ai-title', aiTitle: 'Deploy' }),
+    'not json',
+  ].join('\n') + '\n');
+  assert.deepEqual(searchText(p), ['deploy the site', 'Deploying now.', 'also fix the footer']);
+});

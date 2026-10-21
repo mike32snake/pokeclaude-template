@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 
 // PokeClaude.app is a WKWebView. A WKWebView drops every target="_blank" link and every
 // window.open() unless its UI delegate implements createWebViewWith, so the links the
-// markdown renderer writes did nothing in the app while they worked in Brave. The
+// markdown renderer writes did nothing in the app while they worked in a browser. The
 // Swift has no test harness of its own, so this pins the handlers in the source.
 const src = readFileSync(new URL('../app/main.swift', import.meta.url), 'utf8');
 
@@ -19,8 +19,9 @@ test('a plain link click that leaves the page goes to the browser, not the app w
   assert.match(src, /\.linkActivated/);
 });
 
-test('links open in Brave, the browser everything else here uses', () => {
-  assert.match(src, /com\.brave\.Browser/);
+test('links open in the default browser, not one picked by name', () => {
+  assert.match(src, /NSWorkspace\.shared\.open\(url\)/);
+  assert.doesNotMatch(src, /withBundleIdentifier/);
 });
 
 // swiftc alone is not enough: the Linux toolchain has the compiler but no AppKit, so

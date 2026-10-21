@@ -109,3 +109,21 @@ test('startup never types into a shell', async () => {
   assert.equal(p.writes.length, 0);
   assert.equal(p.keys.length, 0);
 });
+
+// A pen whose command is not found exits in a second. Waiting the full 90s for a
+// composer that can never appear, then saying only "did not become ready", hid the
+// cause. The exit code is the evidence, so say it.
+test('startup fails at once, with the exit code, when the agent process exits', async () => {
+  let reads = 0;
+  const io = {
+    sleep: async () => {},
+    read: async () => { reads++; return { ok: false }; },
+    type: async () => ({ ok: true }), key: async () => ({ ok: true }),
+    exited: () => 127,
+  };
+  const r = await startAgent('pc-x', 'hi', io);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /exited with code 127/);
+  assert.match(r.error, /not found/);
+  assert.ok(reads < 3, `gave up after ${reads} reads, not 90`);
+});

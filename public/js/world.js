@@ -1,5 +1,6 @@
 // Agent placement + movement in the town.
-export function hash(s) { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return h; }
+import { hash, assignSpecies, PLAYER_DEX } from './species.js';
+export { hash };
 
 import { DEX } from './dex.js';
 import { cronSlot } from './crons.js';
@@ -22,6 +23,13 @@ export class World {
 
   sync(agents, now = Date.now()) {
     const seen = new Set();
+    // The server picks each agent's Pokemon (snapshot().species) so a notification names
+    // the one on the pen. Crons are only known here, so they take what is left.
+    const given = agents.filter(a => a.species != null);
+    const prev = new Map([...this.actors].map(([id, ac]) => [id, DEX.indexOf(ac.species)]));
+    const picked = assignSpecies(agents.filter(a => a.species == null).map(a => a.workspaceId),
+      prev, [PLAYER_DEX, ...given.map(a => DEX[a.species][0])]);
+    for (const a of given) picked.set(a.workspaceId, a.species);
     // stable town-square slots for long-blocked agents, 2 tiles apart, no overlap
     const gathered = agents.filter(a => a.status === 'BLOCKED' && a.kind !== 'cron'
       && now - a.since > 30 * 60e3)
@@ -75,14 +83,13 @@ export class World {
           ac = { id: a.workspaceId, fresh: true,
                  x: plot.gate.x * this.T, y: (plot.gate.y + 1) * this.T,
                  variant: 1 + hash(a.workspaceId) % 9,
-                 species: DEX[hash(a.workspaceId + 'v2') % DEX.length],
                  trail: [], facing: 'down', frame: 0, ft: 0,
                  phase: (hash(a.workspaceId) % 100) / 100 * 6.28,   // desync the breathing
                  wanderIn: 2 + (hash(a.workspaceId) % 60) / 10,
                  pop: null, seenSeq: a.toolSeq || 0, spotIdx: null };
           this.actors.set(a.workspaceId, ac);
         }
-        ac.agent = a; ac.plot = plot;
+        ac.agent = a; ac.plot = plot; ac.species = DEX[picked.get(a.workspaceId)];
         if ((a.toolSeq || 0) > ac.seenSeq) {          // a real tool call happened
           ac.seenSeq = a.toolSeq;
           ac.pop = { tool: a.lastTool || 'tool', t: 0 };

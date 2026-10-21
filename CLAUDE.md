@@ -1,7 +1,7 @@
 # Working in PokeClaude
 
 A GBA-style ranch for your live Claude Code agents. Each pen is a repo, each Pokemon
-in it is a running cmux workspace with Claude in it. Localhost only, zero npm
+in it is a running Claude in a pty relay we own. Localhost only, zero npm
 dependencies, vanilla JS on the client and plain Node ESM on the server.
 
 Read `AGENTS.md` before you change anything. It is the long list of invariants, and
@@ -11,9 +11,9 @@ is the shorter working agreement: how to boot, how to verify, and what not to do
 ## Boot
 
     tools/fetch-sprites.sh          # once per clone: the Pokemon sprites are not in git
-    ./run-server.sh                 # inside a cmux workspace, see "The server" below
+    tools/start-server.sh           # under pm2, see "The server" below
     open http://localhost:5180
-    npm test                        # 113 tests, all must pass
+    npm test                        # all tests must pass
     tools/build-app.sh              # optional: PokeClaude.app into /Applications
 
 `npm run build:town` regenerates `public/art/town-{3,4,5}.json` after you edit
@@ -21,11 +21,16 @@ is the shorter working agreement: how to boot, how to verify, and what not to do
 
 ## The server
 
-It runs under `run-server.sh` in its own cmux workspace, NOT under pm2. cmux's control
-socket is `cmuxOnly` and denies pm2, which double-forks to PPID 1. `run-server.sh` is a
-restart loop, so `pkill -f "node src/server/index.js"` restarts the server in place and
-picks up your changes. Do not start a second instance on port 5180; it will crash-loop
-on EADDRINUSE while the real one keeps serving.
+It runs under pm2 as `pokeclaude`, started by `tools/start-server.sh` (PokeClaude.app
+runs the same script). `pm2 restart pokeclaude` picks up your changes. Without pm2 the
+script runs `run-server.sh`, a restart loop. Do not start a second instance on port
+5180; it will crash-loop on EADDRINUSE while the real one keeps serving.
+
+The pens are hosted by our own pty relays now (`POKECLAUDE_BACKEND` defaults to
+`native`), and **they outlive the server** - restarting it no longer kills a single
+agent. The cmux backend is still there behind `POKECLAUDE_BACKEND=cmux`; it is the one
+that needed the server to live inside a cmux workspace, because cmux's control socket is
+`cmuxOnly` and denies pm2, which double-forks to PPID 1.
 
 The client is static files with no build step. A browser reload is the whole deploy.
 

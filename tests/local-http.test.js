@@ -10,21 +10,29 @@ import { localRequestAllowed } from '../src/server/local-http.js';
 const source = readFileSync(new URL('../src/server/index.js', import.meta.url), 'utf8');
 const entry = source.slice(source.indexOf('const server = http.createServer('));
 const bodySource = source.slice(source.indexOf('function readBody(req)'), source.indexOf('// True once the composer'));
+// Every name the entry point reaches for has to be injected here: a free identifier in
+// that region is a ReferenceError, and inside the hook handler's try/catch it is a
+// SWALLOWED one, so the symptom is a hook that silently does nothing. backendName is
+// here because /api/hook now takes the backend - the hook fires for every Claude Code
+// session on this machine, and only one backend's ids are ours. outbox is here because
+// a hook is a pen changing state, which is when a waiting reply may go.
 const start = new Function('http', 'PORT', 'log', 'sendJson', 'state', 'applyHook',
-  'broadcast', 'localRequestAllowed', bodySource + entry + '\nreturn server;');
+  'broadcast', 'localRequestAllowed', 'backendName', 'outbox',
+  bodySource + entry + '\nreturn server;');
 
 async function fixture(t) {
-  let hooks = 0;
+  let hooks = 0, kicks = 0;
   const state = {};
+  const outbox = { kick: async () => { kicks++; } };
   const json = (res, code, body) => {
     res.writeHead(code, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(body));
   };
   const server = start(http, 0, () => {}, json, state, () => hooks++,
-    () => {}, localRequestAllowed);
+    () => {}, localRequestAllowed, 'cmux', outbox);
   t.after(() => new Promise(resolve => server.close(resolve)));
   await once(server, 'listening');
-  return { server, hooks: () => hooks, port: server.address().port };
+  return { server, hooks: () => hooks, kicks: () => kicks, port: server.address().port };
 }
 
 function request(port, headers) {
@@ -66,4 +74,5 @@ test('same-origin browsers and native localhost hooks still work', async t => {
     assert.equal(await request(f.port, { host, origin: `http://${host}`, 'sec-fetch-site': 'same-origin' }), 200);
   }
   assert.equal(f.hooks(), 6);
+  assert.equal(f.kicks(), 6, 'every accepted hook should give the reply queue a look');
 });

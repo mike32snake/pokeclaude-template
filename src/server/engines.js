@@ -16,15 +16,21 @@
 // <model_name>", and a model announced this morning is not in yesterday's cache. A
 // typed name that looks like a model is therefore allowed through, so a new one is
 // usable the day it ships rather than the day this file is edited.
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { atLeast, claudeVersion, readCatalog } from './models.js';
 
-// The five Claude models worth starting an agent on, newest first. These are the
-// strings Claude Code's own --model flag takes; the "[1m]" ones ask for the million
-// token window, which is what cmux.contextWindow() then measures the context bar
-// against. Haiku has no 1M variant.
-export const CLAUDE_MODELS = [
+// Neither list is written here. Both CLIs cache the models their own picker offers, so
+// a model either vendor ships reaches the NEW AGENT form on the next launch of that
+// CLI, and this file only decides how many to show and in which order. The two arrays
+// below are what to show when the cache is not there to read, which is a fresh install.
+//
+// The "[1m]" on the Claude fallbacks asks for the million token window explicitly. The
+// live list does not need it: models.js reads which models have a 1M window from Claude
+// Code's changelog, so the window is known from the name rather than forced by a suffix.
+export const CLAUDE_FALLBACK = [
   { id: 'claude-opus-5[1m]', label: 'Opus 5 (1M context)' },
   { id: 'claude-fable-5-1', label: 'Fable 5.1' },
   { id: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M context)' },
@@ -32,9 +38,6 @@ export const CLAUDE_MODELS = [
   { id: 'claude-haiku-4-5', label: 'Haiku 4.5' },
 ];
 
-// Codex publishes its own list and the CLI caches it, so the picker reads that rather
-// than hard-coding names that go stale on the next release. This is only what to show
-// when the cache is not there to read: a fresh install has not written it yet.
 export const CODEX_FALLBACK = [
   { id: 'gpt-5.6-terra', label: 'GPT-5.6-Terra' },
   { id: 'gpt-5.6-luna', label: 'GPT-5.6-Luna' },
@@ -43,6 +46,27 @@ export const CODEX_FALLBACK = [
 ];
 
 const MAX_MODELS = 5;
+
+// Anthropic's own split: "main" is the four models /model puts up front, "overflow" is
+// everything behind "more models". Taking main first and topping up from overflow gives
+// the same five a person would pick from, in the order Anthropic ranked them, and the
+// first one becomes the form's default - so the default moves on its own when a new
+// flagship ships. A model whose version floor is above the installed CLI is dropped:
+// `claude --model` refuses the name, the pen opens and dies, and that looks exactly
+// like cmux failing.
+export function claudeModels(rows, version = claudeVersion()) {
+  const usable = (Array.isArray(rows) ? rows : [])
+    .filter(m => m && m.id && atLeast(version, m.minVersion));
+  const out = [...usable.filter(m => m.section === 'main'),
+               ...usable.filter(m => m.section !== 'main')]
+    .slice(0, MAX_MODELS)
+    .map(m => ({ id: m.id, label: m.name || m.id }));
+  return out.length ? out : CLAUDE_FALLBACK;
+}
+
+export function readClaudeModels(home = os.homedir(), version = claudeVersion()) {
+  return claudeModels(readCatalog(home), version);
+}
 
 // ~/.codex/models_cache.json, as the Codex CLI writes it. `visibility` is how Codex
 // marks a model that is not for people to pick - an internal reserve pool, the model
@@ -66,9 +90,9 @@ export function readCodexModels(home = os.homedir()) {
 
 // What the NEW AGENT form draws. The default is the first model in each list, so the
 // two orderings above are the only place the default is decided.
-export function catalog({ codex = readCodexModels() } = {}) {
+export function catalog({ claude = readClaudeModels(), codex = readCodexModels() } = {}) {
   return {
-    claude: { label: 'Claude Code', models: CLAUDE_MODELS, default: CLAUDE_MODELS[0].id },
+    claude: { label: 'Claude Code', models: claude, default: claude[0].id },
     codex: { label: 'Codex', models: codex, default: codex[0].id },
   };
 }
@@ -93,23 +117,42 @@ const CLI = {
 // read as another flag), nothing a shell would look at twice.
 export const MODEL_SLUG = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(\[1m\])?$/;
 
-export function spawnCommand(engine, model, codex = readCodexModels()) {
+// A session id, for starting a pen and for resuming one. It reaches the server from a
+// browser in the resume case, so only a UUID is ever spliced into a command line.
+const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+export function spawnCommand(engine, model, models = null, { sessionId = null } = {}) {
   const cli = CLI[engine];
   if (!cli) throw new Error(`${engine} is not an engine PokeClaude can start`);
-  const models = engine === 'codex' ? codex : CLAUDE_MODELS;
-  const want = model || models[0]?.id;
+  // Only read a list when there is no model to run, which is the form's default.
+  const list = models
+    || (model ? [] : engine === 'codex' ? readCodexModels() : readClaudeModels());
+  const want = model || list[0]?.id;
   if (!MODEL_SLUG.test(want || '')) {
     throw new Error(`"${want}" is not a model name`);
   }
-  return `${cli.bin} --model ${shellQuote(want)} ${cli.bypass}${cli.extra}`;
+  // A Claude pen is GIVEN its session id rather than asked for it afterwards.
+  // linkSessions (sessions.js) ties a pen to its conversation by reading the id off
+  // the claude process's command line, and a pen started without one has no link but
+  // the hooks - which live in memory, so a server restart loses them, and a blocked
+  // agent never fires another one to rebuild it. Codex keeps its own rollout files and
+  // is found through those (codexlog.js), so it is not given one.
+  let session = '';
+  if (engine === 'claude') {
+    const id = sessionId || randomUUID();
+    if (!UUID.test(id)) throw new Error(`"${sessionId}" is not a session id`);
+    session = ` --session-id ${id}`;
+  }
+  return `${cli.bin} --model ${shellQuote(want)}${session} ${cli.bypass}${cli.extra}`;
 }
 
-// Resuming a past session, from the PC or the archive. Each CLI spells it differently
-// and the id comes from a browser, so only a UUID is ever spliced in.
-const UUID = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 export function resumeCommand(engine, sessionId) {
   const eng = engine || 'claude';
   if (!CLI[eng]) throw new Error(`${eng} is not an engine PokeClaude can resume`);
   if (!UUID.test(String(sessionId || ''))) throw new Error(`"${sessionId}" is not a session id`);
-  return eng === 'codex' ? `codex resume ${sessionId}${CLI.codex.extra}` : `claude --resume ${sessionId}`;
+  // Resumed with the same "stop asking me" flag as a new pen. Without it the CLI picks
+  // its own mode, and a restored pen came back asking where it never asked before.
+  const cli = CLI[eng];
+  return eng === 'codex' ? `codex resume ${sessionId} ${cli.bypass}${cli.extra}`
+                         : `claude --resume ${sessionId} ${cli.bypass}`;
 }

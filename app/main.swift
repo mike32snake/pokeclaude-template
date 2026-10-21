@@ -4,7 +4,7 @@
 // Two jobs, and the second one is the reason this exists at all:
 //
 //   1. A WKWebView pointed at http://localhost:5180. The client is static files with
-//      no build step, so this is a window around the same page Brave shows.
+//      no build step, so this is a window around the same page a browser shows.
 //   2. A notification poster. macOS credits an alert to the process that asked for it.
 //      osascript means every alert arrives as "Script Editor" with a script icon, and
 //      an AppleScript applet of our own is DENIED outright on macOS 26 (see AGENTS.md).
@@ -22,7 +22,6 @@ let SERVER = "http://localhost:5180"
 // Written in by tools/build-app.sh. The app has to know where the repo is to start the
 // server, and a localhost tool for one machine may as well be told at build time.
 let REPO = Bundle.main.object(forInfoDictionaryKey: "PCRepoPath") as? String ?? ""
-let CMUX = "/Applications/cmux.app/Contents/Resources/bin/cmux"
 
 // MARK: - Talking to the server
 
@@ -43,44 +42,27 @@ func serverIsUp(timeout: TimeInterval = 1.5) -> Bool {
     return up
 }
 
-// Start the server the ONE way that works: inside a cmux workspace. cmux's control
-// socket is cmuxOnly, so a server started from here as a plain child process would
-// serve the page and then quietly lose titles, branches, models and every service pen.
-// Outside cmux the CLI itself needs the password from .env, which is why this can fail
-// and why failing has to be visible rather than silent.
+// Start the server the same way a person does: tools/start-server.sh. It runs the
+// native backend under pm2 and opens a cmux workspace only for POKECLAUDE_BACKEND=cmux.
+// A login shell, because an app launched from the Dock has none of the PATH that finds
+// node and pm2. Failing has to be visible rather than silent, so stderr comes back.
 @discardableResult
 func startServer() -> String? {
-    guard !REPO.isEmpty, FileManager.default.fileExists(atPath: CMUX) else {
-        return "cmux is not installed where the app expects it: \(CMUX)"
+    let script = REPO + "/tools/start-server.sh"
+    guard !REPO.isEmpty, FileManager.default.isExecutableFile(atPath: script) else {
+        return "the start script is missing: \(script)"
     }
-    var args = ["new-workspace", "--name", "pokeclaude server", "--cwd", REPO,
-                "--command", "./run-server.sh"]
-    if let pw = socketPassword() { args = ["--password", pw] + args }
-
     let p = Process()
-    p.executableURL = URL(fileURLWithPath: CMUX)
-    p.arguments = args
+    p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    p.arguments = ["-lc", "exec \"$0\"", script]
     let err = Pipe()
     p.standardError = err
     p.standardOutput = Pipe()
-    do { try p.run() } catch { return "could not run cmux: \(error.localizedDescription)" }
+    do { try p.run() } catch { return "could not run the start script: \(error.localizedDescription)" }
     p.waitUntilExit()
     if p.terminationStatus == 0 { return nil }
     let msg = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-    return msg.isEmpty ? "cmux refused to open the workspace (exit \(p.terminationStatus))" : msg
-}
-
-// The same password src/server/cmux.js reads, from the same gitignored file.
-func socketPassword() -> String? {
-    guard let env = try? String(contentsOfFile: REPO + "/.env", encoding: .utf8) else { return nil }
-    for line in env.split(separator: "\n") {
-        let parts = line.split(separator: "=", maxSplits: 1)
-        guard parts.count == 2, parts[0].trimmingCharacters(in: .whitespaces) == "CMUX_SOCKET_PASSWORD"
-        else { continue }
-        let v = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: " \"'\t"))
-        return v.isEmpty ? nil : v
-    }
-    return nil
+    return msg.isEmpty ? "the start script failed (exit \(p.terminationStatus))" : msg
 }
 
 // MARK: - Links
@@ -92,18 +74,12 @@ func isField(_ url: URL) -> Bool {
     return url.host == s.host && url.port == s.port
 }
 
-// Brave, because every other link on this machine opens there; the system default only
-// if Brave is gone. Links come out of transcripts, which are untrusted, so only web and
+// The system's default browser. Links come out of transcripts, which are untrusted, so only web and
 // mail schemes leave the app: never file:// or a custom scheme that launches something.
 func openOutside(_ url: URL) {
     guard let scheme = url.scheme?.lowercased(), ["http", "https", "mailto"].contains(scheme)
     else { return }
-    let ws = NSWorkspace.shared
-    if let brave = ws.urlForApplication(withBundleIdentifier: "com.brave.Browser") {
-        ws.open([url], withApplicationAt: brave, configuration: NSWorkspace.OpenConfiguration())
-    } else {
-        ws.open(url)
-    }
+    NSWorkspace.shared.open(url)
 }
 
 // MARK: - Notifications
@@ -211,7 +187,7 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKU
         // Without a UI delegate a WKWebView answers every JS dialog as if Cancel was
         // clicked: alert() shows nothing, confirm() returns false, prompt() returns nil,
         // and the page cannot tell. That is how KILL stopped working in the app while it
-        // still worked in Brave. The page no longer asks this way, but anything that
+        // still worked in a browser. The page no longer asks this way, but anything that
         // does must be seen rather than swallowed.
         web.uiDelegate = self
         // The field is a canvas the page sizes to its window; a rubber band under it
@@ -367,8 +343,8 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKU
         }
     }
 
-    // The server takes a few seconds to come up inside a fresh cmux workspace, so a
-    // single check after starting it would always say it failed.
+    // The server takes a few seconds to come up, so a single check after starting it
+    // would always say it failed.
     private func waitForServer(startError: String?) {
         for _ in 0..<40 {
             if serverIsUp(timeout: 0.8) {
@@ -411,16 +387,15 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKU
     }
 
     private func bootingPage() -> String {
-        page("<h1>Starting the server</h1><p>Opening a cmux workspace on ./run-server.sh</p>")
+        page("<h1>Starting the server</h1><p>Running tools/start-server.sh</p>")
     }
 
     private func downPage(_ err: String?) -> String {
         let why = err.map { "<p>\($0.replacingOccurrences(of: "<", with: "&lt;"))</p>" } ?? ""
         return page("""
         <h1>No server on port 5180</h1>\(why)
-        <p>Start it in its own cmux workspace. It must run inside cmux: outside it the
-        control socket is denied and titles, branches, models and service pens go missing.</p>
-        <code>cd \(REPO)\n./run-server.sh</code>
+        <p>Start it from a terminal. It runs under pm2; the pens keep running either way.</p>
+        <code>\(REPO)/tools/start-server.sh</code>
         <p><button onclick="location.reload()">Try again</button></p>
         """)
     }
@@ -437,7 +412,7 @@ final class Delegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, WKU
     //
     // A WKWebView drops every target="_blank" link and every window.open() unless the
     // UI delegate makes a web view for it, and says nothing. That is why the links in a
-    // chat reply did nothing in the app while they worked in Brave. This is one window,
+    // chat reply did nothing in the app while they worked in a browser. This is one window,
     // so a link that wants a new one goes to the browser instead.
     func webView(_ w: WKWebView, createWebViewWith cfg: WKWebViewConfiguration,
                  for action: WKNavigationAction, windowFeatures f: WKWindowFeatures) -> WKWebView? {

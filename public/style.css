@@ -1,0 +1,8 @@
+
+/* A native pen's terminal, streamed into the panel. One div per row, patched in place;
+   rebuilding the whole screen on every frame is what froze the preview tab. */
+.terminal-controls pre.screen.live { background: #000; color: #c5c5c5; padding: 8px;
+  line-height: 1.25; max-height: 46vh; overflow: auto; }
+.terminal-controls pre.screen.live div { min-height: 1.25em; white-space: pre; }
+.terminal-controls .t-live { align-self: center; font-size: 11px; color: #7cc7ff;
+  letter-spacing: .06em; }

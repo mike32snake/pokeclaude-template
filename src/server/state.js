@@ -1,4 +1,6 @@
 import { normalizeDir } from './paths.js';
+import { cleanVerify } from '../../public/js/proof.js';
+import { assignSpecies } from '../../public/js/species.js';
 
 // cmux status string -> game state
 export function mapCmuxStatus(s) {
@@ -95,20 +97,39 @@ export function applyCmux(state, wsList, sessionRows, now = Date.now()) {
 }
 
 // A hook event from a live Claude Code session.
-export function applyHook(state, { cmuxWorkspaceId, event }, now = Date.now()) {
-  if (!cmuxWorkspaceId) return;
-  let a = state.agents.get(cmuxWorkspaceId);
+export function applyHook(state, { cmuxWorkspaceId, agentId, event }, now = Date.now(),
+                          backend = null) {
+  // Whichever backend started the pen names it. cmux exports CMUX_WORKSPACE_ID and the
+  // pty relay exports POKECLAUDE_AGENT_ID; the hook sends both, and the one the other
+  // backend did not set arrives as an empty string, which is not an id.
+  //
+  // The hook fires for EVERY Claude Code session on this machine, not only the pens, so
+  // when the backend is known only its own kind of id counts. Taking the other one made
+  // a pen with no terminal behind it, which appeared on the field and fainted a few
+  // seconds later - every time you typed in a terminal of your own.
+  const id = backend === 'native' ? agentId
+           : backend === 'cmux' ? cmuxWorkspaceId
+           : (cmuxWorkspaceId || agentId);
+  if (!id) return;
+  let a = state.agents.get(id);
   if (!a) {
-    a = { workspaceId: cmuxWorkspaceId, sessionId: null, status: 'WORKING', since: now, followers: 0, lastHookAt: -1e15 };
-    state.agents.set(cmuxWorkspaceId, a);
+    a = { workspaceId: id, sessionId: null, status: 'WORKING', since: now, followers: 0, lastHookAt: -1e15 };
+    state.agents.set(id, a);
   }
   a.lastHookAt = now;
   if (event.session_id) a.sessionId = event.session_id;
   if (event.transcript_path) a.transcriptPath = event.transcript_path;
   if (event.cwd) { a.rawDir = a.rawDir || event.cwd; a.dir = a.dir || normalizeDir(event.cwd); }
-  const set = (s) => { if (a.status !== s) { a.status = s; a.since = now; } };
+  // What the hook SAID, kept apart from the status it produced. The native backend
+  // reconciles hooks against what a pen's screen shows (nativestatus.js), and it needs
+  // to know the hook's own claim rather than a status the screen may have moved since.
+  const set = (s) => { a.lastHookStatus = s; if (a.status !== s) { a.status = s; a.since = now; } };
   switch (event.hook_event_name) {
-    case 'UserPromptSubmit': set('WORKING'); break;
+    // A new turn: whatever the last one proved says nothing about this one.
+    case 'UserPromptSubmit': set('WORKING'); a.verify = null; break;
+    // Not a status change. An optional Stop hook of your own says whether the turn that just stopped was
+    // checked after its last edit; see public/js/proof.js.
+    case 'VerifyResult': a.verify = cleanVerify(event.verify); break;
     case 'PreToolUse':
       set('WORKING');
       // toolSeq increments on every real tool call; the client animates on the change.
@@ -146,13 +167,24 @@ export function markHollow(state, workspaceId, hollow) {
 }
 
 export function snapshot(state) {
+  const live = [...state.agents.values()].filter(a => !a.hollow);
+  // One Pokemon per agent on the field, remembered so a newcomer never takes one that
+  // is already out. public/js/species.js has the rule; the field draws this answer.
+  state.species = assignSpecies(live.map(a => a.workspaceId), state.species || new Map());
   return {
     version: state.version,
-    agents: [...state.agents.values()].filter(a => !a.hollow).map(a => ({
+    agents: live.map(a => ({
       workspaceId: a.workspaceId, ref: a.ref || null, sessionId: a.sessionId,
+      species: state.species.get(a.workspaceId),
+      // Read from the LIVE PROCESS TABLE rather than told to us by a hook, so it is the
+      // session that terminal is actually running. A hook outlives the process that
+      // sent it, which is the difference that matters when something is about to resume
+      // one of these somewhere else (migrate.js).
+      procSessionId: a.procSessionId || null, codexSessionId: a.codexSessionId || null,
       tty: a.tty || null,
       dir: a.dir || null, rawDir: a.rawDir || null, title: a.title || '',
       branch: a.branch || null, status: a.status, since: a.since, followers: a.followers,
+      verify: a.verify || null,
       lastTool: a.lastTool || null, lastToolAt: a.lastToolAt || 0, toolSeq: a.toolSeq || 0,
       faintedAt: a.faintedAt || 0, kind: a.kind || 'agent', ports: a.ports || [],
       engine: a.engine || null,

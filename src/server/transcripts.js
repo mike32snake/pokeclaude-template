@@ -268,9 +268,13 @@ export function isTranscriptPath(p) {
 // lives under ~/.codex/sessions, everything else is a Claude transcript. Every reader
 // of a session row (the archive, search, Ash's recall, /api/transcript) goes through
 // here, so a Codex session opens as its conversation and never as an empty thread.
-export function readConversation(p, limit = 40, { home } = {}) {
-  return isCodexTranscriptPath(p, home) ? parseCodexConversation(p, limit)
-                                        : parseConversation(p, limit);
+//
+// `whole` is for find: every turn, no window and no gap. The pane's trim is right for
+// reading and wrong for searching, because a word in the dropped middle is reported as
+// not there. It reads the file whole, so it is only ever asked for on demand.
+export function readConversation(p, limit = 40, { home, whole = false } = {}) {
+  const parse = isCodexTranscriptPath(p, home) ? parseCodexConversation : parseConversation;
+  return whole ? parse(p, Infinity, Infinity) : parse(p, limit);
 }
 
 // The PC's list is BOTH engines, newest first, cut to what was asked for.
@@ -278,8 +282,54 @@ export function mergeSessions(claude, codex, limit) {
   return [...claude, ...codex].sort((a, b) => b.mtime - a.mtime).slice(0, limit);
 }
 
+// The PC pages through a repo's sessions. It lists one row past the page, so `more`
+// says whether an older page exists without counting every transcript on disk.
+export function pageSessions(rows, limit) {
+  return { sessions: rows.slice(0, limit), more: rows.length > limit };
+}
+export function sessionLimit(raw) {
+  const n = Math.floor(Number(raw));
+  return n > 0 ? Math.min(1000, n) : 12;
+}
+
+// What was said in a session, by either side, for the PC search. Tool calls and their
+// output are most of a transcript's bytes and none of what anyone searches for, so a
+// line is only parsed when a cheap look says it can hold a message.
+export function searchText(p) {
+  if (isCodexTranscriptPath(p)) return readConversation(p, Infinity, { whole: true }).map(t => t.text).filter(Boolean);
+  let text;
+  try { text = fs.readFileSync(p, 'utf8'); } catch { return []; }
+  const out = [];
+  for (const line of text.split('\n')) {
+    if (line.includes('"queued_command"')) {
+      try { const d = JSON.parse(line); const q = String(d.attachment?.prompt || '').trim(); if (q) out.push(q); } catch {}
+      continue;
+    }
+    if (line.includes('"tool_result"')) continue;
+    if (!line.includes('"type":"user"') && !line.includes('"type":"assistant"')) continue;
+    let d; try { d = JSON.parse(line); } catch { continue; }
+    if (d.type !== 'user' && d.type !== 'assistant') continue;
+    const raw = d.message?.content;
+    if (typeof raw === 'string') { if (raw.trim()) out.push(raw.trim()); continue; }
+    for (const b of raw || []) if (b?.type === 'text' && b.text?.trim()) out.push(b.text.trim());
+  }
+  return out;
+}
+
 // PC listing: sessions for a repo dir, including nested project dirs (nested per-room projects).
 export function listSessions(rawDir, limit = 12) {
+  const top = claudeFiles(rawDir).slice(0, limit).map(describeSession);
+  return mergeSessions(top, listCodexSessions(rawDir, { limit }), limit);
+}
+
+// Every session in a repo, newest first, from a stat of each file. A Claude row has no
+// title or count yet: describeSession() reads the file for those, and the PC search
+// calls it one file at a time so a big repo never stalls the server.
+export function sessionFiles(rawDir) {
+  return mergeSessions(claudeFiles(rawDir), listCodexSessions(rawDir, { limit: Infinity }), Infinity);
+}
+
+function claudeFiles(rawDir) {
   const slug = projectSlug(realCaseDir(rawDir));
   let dirs = [];
   try { dirs = fs.readdirSync(PROJECTS).filter(d => d === slug || d.startsWith(slug + '-')); } catch { return []; }
@@ -292,26 +342,43 @@ export function listSessions(rawDir, limit = 12) {
       const p = path.join(full, f);
       let st; try { st = fs.statSync(p); } catch { continue; }
       if (st.size < 200) continue;
-      rows.push({ path: p, sessionId: f.replace('.jsonl', ''), mtime: st.mtimeMs, size: st.size, project: d });
+      rows.push({ path: p, sessionId: f.replace('.jsonl', ''), mtime: st.mtimeMs, size: st.size, project: d, engine: 'claude' });
     }
   }
-  rows.sort((a, b) => b.mtime - a.mtime);
-  const top = rows.slice(0, limit);
-  for (const r of top) {
-    let title = null, lines = 0;
-    try {
-      const text = fs.readFileSync(r.path, 'utf8');
-      lines = (text.match(/\n/g) || []).length;
-      for (const line of text.split('\n').slice(0, 400)) {
-        if (line.includes('"ai-title"')) {
-          try { const d = JSON.parse(line); if (d.type === 'ai-title' && d.aiTitle) { title = d.aiTitle; break; } } catch {}
-        }
+  return rows.sort((a, b) => b.mtime - a.mtime);
+}
+
+// A Codex row is described when it is listed; a Claude row is described here.
+export function describeSession(r) {
+  if (r.engine === 'codex') return r;
+  const { title, lines } = titleOf(r);
+  const { size, ...out } = r;
+  return { ...out, title: title || r.sessionId.slice(0, 8), msgs: lines };
+}
+
+// Reading a transcript for its title means reading all of it, for the line count. The
+// PC search lists every session in a repo on each keystroke, so the answer is kept
+// until the file changes.
+const titles = new Map();                              // path -> { mtime, size, title, lines }
+function titleOf(r) {
+  const hit = titles.get(r.path);
+  if (hit && hit.mtime === r.mtime && hit.size === r.size) return hit;
+  let title = null, lines = 0;
+  try {
+    // Count newlines on the bytes and decode only the first 400 lines: a transcript
+    // can be 40MB, and turning all of it into a string is most of the cost.
+    const buf = fs.readFileSync(r.path);
+    let headEnd = buf.length;
+    for (let i = buf.indexOf(10); i >= 0; i = buf.indexOf(10, i + 1)) {
+      if (++lines === 400) headEnd = i;
+    }
+    for (const line of buf.subarray(0, headEnd).toString('utf8').split('\n')) {
+      if (line.includes('"ai-title"')) {
+        try { const d = JSON.parse(line); if (d.type === 'ai-title' && d.aiTitle) { title = d.aiTitle; break; } } catch {}
       }
-    } catch {}
-    r.title = title || r.sessionId.slice(0, 8);
-    r.msgs = lines;
-    r.engine = 'claude';
-    delete r.size;
-  }
-  return mergeSessions(top, listCodexSessions(rawDir, { limit }), limit);
+    }
+  } catch {}
+  const out = { mtime: r.mtime, size: r.size, title, lines };
+  titles.set(r.path, out);
+  return out;
 }

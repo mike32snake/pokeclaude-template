@@ -296,7 +296,15 @@ export function rolloutPath(sessionId, home = os.homedir()) {
 // titled by its opening ask, like a Claude session with no ai-title.
 const META_BYTES = 262144;
 
+// The first line never changes once written, so a known file is not read again.
+const metas = new Map();                               // path -> payload
 function sessionMeta(file) {
+  if (metas.has(file)) return metas.get(file);
+  const m = readMeta(file);
+  if (m) metas.set(file, m);
+  return m;
+}
+function readMeta(file) {
   try {
     const size = fs.statSync(file).size;
     const head = readWindow(file, 0, Math.min(size, META_BYTES));
@@ -362,17 +370,29 @@ export function listCodexSessions(rawDir, { limit = 12, home = os.homedir() } = 
     const cwd = canon(m.cwd);
     if (cwd !== want && !cwd.startsWith(want + '/')) continue;
     const id = m.session_id || m.id || path.basename(f.path).replace(/^.*-([0-9a-f-]{36})\.jsonl$/i, '$1');
-    let msgs = 0, opening = null;
-    try {
-      const text = fs.readFileSync(f.path, 'utf8');
-      msgs = (text.match(/"type":"(UserMessage|AgentMessage)"/g) || []).length;
-      opening = parseCodexTurns(text.slice(0, HEAD_BYTES)).find(t => t.role === 'user')?.text || null;
-    } catch {}
+    const { msgs, opening } = countOf(f);
     rows.push({ path: f.path, sessionId: id, mtime: f.mtime, engine: 'codex',
                 title: titles.get(id) || (opening ? opening.slice(0, 80) : id.slice(0, 8)),
                 msgs });
   }
   return rows;
+}
+
+// The PC search lists every rollout on each keystroke. Each one is read whole for its
+// count and opening, so that is kept until the file changes.
+const counts = new Map();                              // path -> { mtime, msgs, opening }
+function countOf(f) {
+  const hit = counts.get(f.path);
+  if (hit && hit.mtime === f.mtime) return hit;
+  let msgs = 0, opening = null;
+  try {
+    const text = fs.readFileSync(f.path, 'utf8');
+    msgs = (text.match(/"type":"(UserMessage|AgentMessage)"/g) || []).length;
+    opening = parseCodexTurns(text.slice(0, HEAD_BYTES)).find(t => t.role === 'user')?.text || null;
+  } catch {}
+  const out = { mtime: f.mtime, msgs, opening };
+  counts.set(f.path, out);
+  return out;
 }
 
 // Guard for /api/transcript: only a rollout file under ~/.codex/sessions is ever read.

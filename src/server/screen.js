@@ -22,6 +22,9 @@ export const READ_LINES = 40;
 // A modal that swallows keystrokes. Answering these is what `action: choose` is for.
 const QUESTION = /↑↓\s*to move|Enter to select|Do you want to (proceed|make this edit|create)/i;
 
+// A menu's own footer. Checked after the questions, which print it too.
+const MENU = /Enter to (continue|confirm)\s*·\s*Esc to (cancel|go back|exit)/i;
+
 // Claude Code is on screen. Any one of these is enough.
 const CLAUDE_UI = [
   /shift\+tab to cycle/i,
@@ -64,12 +67,23 @@ export function draftOnScreen(screen) {
 function boxText(screen) {
   const lines = (screen || '').split('\n');
   let at = -1;
-  for (let i = lines.length - 1; i >= 0; i--) if (COMPOSER.test(lines[i])) { at = i; break; }
+  for (let i = lines.length - 1; i >= 0; i--) if (COMPOSER.test(lines[i]) && inBox(lines, i)) { at = i; break; }
   if (at < 0) return '';
   const out = [lines[at].match(COMPOSER)[1]];
   // Continuation lines are indented two spaces by Claude Code: layout, not text.
   for (let i = at + 1; i < lines.length && !BOX_END(lines[i]); i++) out.push(lines[i].replace(/^  /, ''));
   return out.map(l => l.replace(/\s+$/, '')).join('\n').trim();
+}
+// Claude Code's "❯" is everywhere: every message sent is echoed into the scrollback as
+// "❯ your words", and every menu (Rewind, pickers) draws its cursor with it. Only the one
+// straight under the box's top rule is the input box. Codex draws "›" with no rule
+// above, so it stands. The rule sits directly over the "❯", so a read that cut one off
+// cut the other too.
+function inBox(lines, i) {
+  if (!/^\s*❯/.test(lines[i])) return true;
+  let k = i - 1;
+  while (k >= 0 && !lines[k].trim()) k--;
+  return k >= 0 && RULE.test(lines[k]);
 }
 // The hint each engine paints in its own empty box. Neither is text anyone typed.
 const PLACEHOLDER = /^(Try "[^"\n]*"|Ask Codex to do anything)$/;
@@ -124,6 +138,12 @@ export function inputBoxState(screen) {
     return { ok: false,
       reason: 'that agent is waiting on a question — pick an answer above, or open the tab' };
   }
+  // A menu with no answers to click (Rewind, opened by two Escapes on an empty box).
+  // Typing into it picks nothing, and it is not a draft to send or discard.
+  if (MENU.test(s)) {
+    return { ok: false,
+      reason: 'a menu is open in that tab — press Escape in Terminal controls to close it, or open the tab' };
+  }
   // Text already in the box would go out glued to ours as one message nobody wrote.
   // This is how a send that half-landed used to resurface inside the next one.
   const draft = draftOnScreen(s);
@@ -175,7 +195,7 @@ export function trustGate(screen) {
 export function composerRegion(screen) {
   const lines = (screen || '').split('\n');
   let at = -1;
-  for (let i = lines.length - 1; i >= 0; i--) if (COMPOSER.test(lines[i])) { at = i; break; }
+  for (let i = lines.length - 1; i >= 0; i--) if (COMPOSER.test(lines[i]) && inBox(lines, i)) { at = i; break; }
   if (at < 0) return '';
   const out = [];
   for (let i = at; i < lines.length && (i === at || !BOX_END(lines[i])); i++) out.push(lines[i]);

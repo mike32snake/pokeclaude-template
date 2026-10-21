@@ -4,6 +4,8 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import url from 'node:url';
+import { readLargeWindowNames } from './models.js';
+import { createSurfaceCache, withSurface } from './surfaces.js';
 import { composerRegion, draftOnScreen, CODEX_FOOTER, inputBoxState } from './screen.js';
 
 const CLI = '/Applications/cmux.app/Contents/Resources/bin/cmux';
@@ -139,46 +141,80 @@ export function terminalSurface(surfaces) {
   const terminals = (surfaces || []).filter(s => s.type === 'terminal');
   return terminals.length === 1 ? (terminals[0].id || terminals[0].ref) : null;
 }
-async function terminalTarget(ws) {
+
+// The same, but only if cmux answered the question we asked.
+//
+// surface.list for an UNKNOWN workspace does not fail. It returns the FOCUSED
+// workspace's surfaces and says ok, on both transports, and for an empty workspace_id
+// too. So a read aimed at a pen that had gone away came back with whatever pane you
+// were looking at - probeDraft on a dead ref returned a live draft from another repo -
+// and this is the same lookup that send and send-key address. Every reply carries
+// workspace_ref, and it is right whenever the workspace is real, so the answer is
+// checked against the question and a reply that cannot be checked is not trusted.
+export function terminalSurfaceFor(reply, ws) {
+  if (!reply) return null;
+  const ref = reply.workspace_ref, id = reply.workspace_id;
+  if (!ref && !id) return null;
+  if (ws !== ref && ws !== id) return null;
+  return terminalSurface(reply.surfaces);
+}
+
+// The surface id, looked up once per terminal and kept (surfaces.js says why). The
+// socket answers this in 1ms; the CLI takes 188ms because it is a process spawn, and
+// it is only asked when there is a password, which the socket path cannot present.
+// The two transports wrap the answer differently: the CLI prints the result, the
+// socket wraps it in { ok, result }.
+const surfaceCache = createSurfaceCache();
+async function lookupSurface(ws) {
+  if (!PASSWORD) {
+    const r = await rpcSocket('surface.list', { workspace_id: ws });
+    if (r.ok) {
+      try { return terminalSurfaceFor(JSON.parse(r.stdout).result, ws); } catch {}
+    } else if (!r.transport) return null;
+  }
   const r = await cmux(['rpc', 'surface.list', JSON.stringify({ workspace_id: ws })]);
   if (!r.ok) return null;
-  try { return terminalSurface(JSON.parse(r.stdout).surfaces); } catch { return null; }
+  try { return terminalSurfaceFor(JSON.parse(r.stdout), ws); } catch { return null; }
 }
-const targetFailure = () => ({ ok: false, stdout: '', stderr: 'Could not identify a unique terminal for this workspace.' });
+// A workspace whose terminal has gone must stop being addressed at its old id, so
+// every call goes through withSurface rather than reading the cache itself.
+const onTerminal = (ws, use) => withSurface(surfaceCache, ws, lookupSurface, use);
+export const forgetSurfaces = () => surfaceCache.clear();
+
 async function sendText(ws, text) {
-  const surface = await terminalTarget(ws);
-  if (!surface) return targetFailure();
-  const params = { workspace_id: ws, surface_id: surface, text };
-  if (!PASSWORD) {
-    const r = await rpcSocket('surface.send_text', params);
-    if (r.ok || !r.transport) return r;
-  }
-  return cmux(['rpc', 'surface.send_text', JSON.stringify(params)]);
+  return onTerminal(ws, async (surface) => {
+    const params = { workspace_id: ws, surface_id: surface, text };
+    if (!PASSWORD) {
+      const r = await rpcSocket('surface.send_text', params);
+      if (r.ok || !r.transport) return r;
+    }
+    return cmux(['rpc', 'surface.send_text', JSON.stringify(params)]);
+  });
 }
 async function sendKeyFast(ws, key) {
-  const surface = await terminalTarget(ws);
-  if (!surface) return targetFailure();
-  const params = { workspace_id: ws, surface_id: surface, key };
-  if (!PASSWORD) {
-    const r = await rpcSocket('surface.send_key', params);
-    if (r.ok || !r.transport) return r;
-  }
-  return sendKey(ws, key);
+  return onTerminal(ws, async (surface) => {
+    const params = { workspace_id: ws, surface_id: surface, key };
+    if (!PASSWORD) {
+      const r = await rpcSocket('surface.send_key', params);
+      if (r.ok || !r.transport) return r;
+    }
+    return cmux(['send-key', '--workspace', ws, '--surface', surface, key]);
+  });
 }
 // The pane's text over the socket, in the same { ok, stdout } shape as readScreen.
 export async function readText(ws, lines = 40) {
-  const surface = await terminalTarget(ws);
-  if (!surface) return targetFailure();
-  if (!PASSWORD) {
-    const r = await rpcSocket('surface.read_text', { workspace_id: ws, surface_id: surface, lines });
-    if (r.ok) {
-      try {
-        const b64 = JSON.parse(r.stdout).result?.base64 || '';
-        return { ok: true, stdout: Buffer.from(b64, 'base64').toString('utf8'), stderr: '' };
-      } catch {}
-    } else if (!r.transport) return r;
-  }
-  return readScreen(ws, lines);
+  return onTerminal(ws, async (surface) => {
+    if (!PASSWORD) {
+      const r = await rpcSocket('surface.read_text', { workspace_id: ws, surface_id: surface, lines });
+      if (r.ok) {
+        try {
+          const b64 = JSON.parse(r.stdout).result?.base64 || '';
+          return { ok: true, stdout: Buffer.from(b64, 'base64').toString('utf8'), stderr: '' };
+        } catch {}
+      } else if (!r.transport) return r;
+    }
+    return cmux(['read-screen', '--workspace', ws, '--surface', surface, '--lines', String(lines)]);
+  });
 }
 
 // Typing a message into a Claude Code pane, one line at a time.
@@ -318,19 +354,24 @@ export const tap = (ws, key) => sendKeyFast(ws, key);
 // cmux's send-key only accepts NAMED keys (enter, up, escape...). Digits and other
 // characters must go through `send` as text, or it returns "Unknown key" and the
 // keystroke is silently lost.
-export const sendKey = async (ws, key) => {
-  const surface = await terminalTarget(ws);
-  return surface ? cmux(['send-key', '--workspace', ws, '--surface', surface, key]) : targetFailure();
-};
+export const sendKey = (ws, key) =>
+  onTerminal(ws, (surface) => cmux(['send-key', '--workspace', ws, '--surface', surface, key]));
 export const NAMED_KEY = /^(enter|escape|tab|space|backspace|up|down|left|right|home|end|pageup|pagedown|ctrl\+\w|shift\+\w+)$/i;
 export const press = (ws, key) =>
   NAMED_KEY.test(key) ? sendKey(ws, key) : cmux(['send', '--workspace', ws, key]);
 export const selectWorkspace = (ws) => cmux(['select-workspace', '--workspace', ws]);
+// No redraw event reaches us through cmux, so waiting for the screen is a sleep.
+export const settle = (_ws, ms) => new Promise(r => setTimeout(r, ms));
+// OPEN TAB: select the pen's tab, then bring the app itself forward.
+export async function showWorkspace(ws) {
+  if (ws) await selectWorkspace(ws);
+  execFile('open', ['-a', 'cmux'], () => {});
+  return { ok: true, stdout: '', stderr: '' };
+}
 export const closeWorkspace = (ws) => cmux(['close-workspace', '--workspace', ws]);
-export const readScreen = async (ws, lines = 40) => {
-  const surface = await terminalTarget(ws);
-  return surface ? cmux(['read-screen', '--workspace', ws, '--surface', surface, '--lines', String(lines)]) : targetFailure();
-};
+export const readScreen = (ws, lines = 40) =>
+  onTerminal(ws, (surface) =>
+    cmux(['read-screen', '--workspace', ws, '--surface', surface, '--lines', String(lines)]));
 // Returns the new workspace's ref, parsed from cmux's own output. Never look the new
 // workspace up by title: several can share one, and you will drive the wrong terminal.
 export async function newWorkspace(name, cwd, command) {
@@ -416,9 +457,24 @@ export const LARGE_WINDOW = 1_000_000;
 // the name mentions it, and reading the label alone measured a 388k Fable session
 // against 200k and reported a bar at 100%.
 const ALWAYS_LARGE = /\b(fable|mythos)\b/i;
+
+// Every other model with no 200k variant, which a regex of families here cannot keep
+// up with: Opus 5.5, Sonnet 5.5 and Opus 5 are all 1M by default and none of them say
+// so in the name. models.js reads that off Claude Code's own changelog, in both the id
+// and display-name spellings, so a model shipped this morning is measured correctly.
+// Read once per server run, the same as everything else models.js caches.
+let large = null;
+export function useLargeWindows(names) { large = names; }
+const largeNames = () => (large ??= readLargeWindowNames());
+
 export function contextWindow(...names) {
-  const s = names.filter(Boolean).join(' ');
-  return (/\b1m\b/i.test(s) || ALWAYS_LARGE.test(s)) ? LARGE_WINDOW : STANDARD_WINDOW;
+  const parts = names.filter(Boolean).map(String);
+  const s = parts.join(' ');
+  if (/\b1m\b/i.test(s) || ALWAYS_LARGE.test(s)) return LARGE_WINDOW;
+  // Whole names, not substrings: "Sonnet 5" and "Sonnet 5.5" are different models with
+  // different windows, and one contains the other.
+  const big = largeNames();
+  return parts.some(p => big.has(p.trim().toLowerCase())) ? LARGE_WINDOW : STANDARD_WINDOW;
 }
 
 // Claude Code compacts a session before it reaches its window, so a count past the

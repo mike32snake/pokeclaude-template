@@ -34,12 +34,16 @@ export function keepCenter(v, oldScale, newScale) {
 // yesterday's wider screen, a window too narrow to satisfy both halves, and a stored
 // value that has gone bad. Those are worth a test, so they live here.
 //
-// The field gives way first, down to FIELD_MIN. Below that the panel yields instead:
-// a panel under PANEL_MIN cannot show a transcript, and a field can always be zoomed.
-export const PANEL_MIN = 300, PANEL_MAX = 900, FIELD_MIN = 420;
-export function panelWidth(px, winW) {
+// `room` is the width the panel and the field share. The field gives way first, down
+// to FIELD_MIN. A drag that carries on past halfway through that minimum means "give
+// me everything": the panel takes the whole room and the field goes. A sliver of
+// field in between would show nothing and still cost the panel its width.
+// Below PANEL_MIN the panel never yields: it cannot show a transcript, and a field
+// can always be zoomed. Infinity is a valid ask, and is how "full" is stored.
+export const PANEL_MIN = 300, FIELD_MIN = 420;
+export function panelWidth(px, room) {
   const want = Number(px);
-  if (!Number.isFinite(want)) return PANEL_MIN;
-  const room = Math.min(PANEL_MAX, winW - FIELD_MIN);
-  return Math.max(PANEL_MIN, Math.min(room, want));
+  if (Number.isNaN(want)) return PANEL_MIN;
+  if (want >= room - FIELD_MIN / 2) return Math.max(PANEL_MIN, room);
+  return Math.max(PANEL_MIN, Math.min(room - FIELD_MIN, want));
 }

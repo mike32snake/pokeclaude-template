@@ -61,6 +61,21 @@ body.resizing #panel{transition:none}
 #blocked-pill.zero{background:#2e7d32}
 #panel-body{flex:1;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:9px}
 
+/* Find in a conversation (Cmd+F). The bar lives OUTSIDE #panel-body: the body is
+   rebuilt on every transcript write, and an input inside it would lose its focus and
+   its text each time. */
+#findbar{display:flex;align-items:center;gap:5px;padding:6px 10px;background:#efeee4;
+  border-bottom:3px solid #1a1a1a;flex-shrink:0}
+#findbar[hidden],#panel.collapsed #findbar{display:none}
+#find-q{flex:1;min-width:0;font:12px "Courier New",monospace;padding:4px 6px;
+  border:2px solid #1a1a1a;background:#fff;color:#111}
+#find-count{font-size:11px;color:#3d4450;white-space:nowrap;min-width:62px;text-align:right}
+#findbar button{font:bold 11px "Courier New",monospace;padding:3px 7px;cursor:pointer;
+  border:2px solid #1a1a1a;background:#fff;color:#111;box-shadow:none}
+#findbar button:hover{background:#dbe6fb}
+mark.find-hit{background:#ffe27a;color:inherit;border-radius:2px}
+mark.find-hit.cur{background:#ff9632;color:#111;outline:2px solid #1a1a1a}
+
 /* blocked-agent strip: click a face to switch conversations */
 #queue-strip{display:flex;gap:4px;overflow-x:auto;padding:6px 8px;background:#e9e7dc;
   border-bottom:2px solid #1a1a1a;flex-shrink:0;min-height:44px;align-items:center}
@@ -140,6 +155,9 @@ body.resizing #panel{transition:none}
 .ask-opt.picked b{color:#1b5e20}
 .ask-opt.picked b::before{content:'✓ '}
 .ask-opt.live{cursor:pointer}
+.ask-opt.ask-submit{display:block;width:100%;text-align:center;border-color:#0648C0;background:#0648C0;margin-top:6px}
+.ask-opt.ask-submit b{color:#fff;letter-spacing:.08em}
+.ask-opt.ask-submit:hover{background:#053a9c}
 .ask-opt.live:hover{border-color:#0648C0;background:#eef3fd;box-shadow:2px 2px 0 #0648C0}
 .ask-opt.live.busy{opacity:.55;cursor:progress}
 .ask-opt.on{border-color:#4d8bf0}
@@ -171,6 +189,7 @@ body.resizing #panel{transition:none}
   border:1px solid #9a8a3a;background:#fff;color:#3a3000}
 .stuck-row button:hover{border-color:#0648C0;color:#0648C0}
 .stuck-row button:disabled{opacity:.5;cursor:default}
+.q-row mark{background:#ffe27a;color:inherit;border-radius:2px;padding:0 1px}
 .q-row .snip{display:block;color:#555;font-size:10px;line-height:1.45;margin-top:3px;
   white-space:normal}
 /* Which CLI wrote a past session: the PC and the archive list both engines in one list. */
@@ -502,6 +521,13 @@ pre.screen{font-size:10px;line-height:1.3;background:#111;color:#cfc;padding:8px
       <b>POKECLAUDE</b>
       <span id="blocked-pill" class="zero">0</span>
       <button id="panel-toggle" title="Collapse">▶</button>
+    </div>
+    <div id="findbar" hidden>
+      <input id="find-q" placeholder="Find in this conversation…" autocomplete="off" spellcheck="false">
+      <span id="find-count"></span>
+      <button id="find-prev" title="Previous match (Shift+Enter)">▲</button>
+      <button id="find-next" title="Next match (Enter)">▼</button>
+      <button id="find-close" title="Close (Esc)">✕</button>
     </div>
     <div id="panel-body"></div>
     <div id="attachments"></div>

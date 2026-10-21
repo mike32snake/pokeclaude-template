@@ -1,0 +1,26 @@
+
+▗ ▗   ▖ ▖  Claude Code v2.1.286
+           Haiku 4.5 · Claude Max
+ ▘▘   ▝▝   /tmp/pc-ms
+
+⚠ 1 MCP server needs authentication · run /mcp
+
+❯ Call the AskUserQuestion tool once with exactly two questions. Question 1: header 'Fruit', question 'Which fruit?', multiSelect false, options Apple and Pear. Question 2: header 'Colors', question
+  'Which colors?', multiSelect true, options Red, Green, Blue. Then after the answer, reply with exactly the answers you got.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Fruit  ☐ Colors  ✔ Submit  →
+
+Which colors?
+
+❯ 1. [ ] Red
+         The color red
+  2. [ ] Green
+         The color green
+  3. [ ] Blue
+         The color blue
+  4. [ ] Type something
+     Submit
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

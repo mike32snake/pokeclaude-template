@@ -1,8 +1,8 @@
 #!/bin/bash
-# PokeClaude server supervisor.
-# Runs INSIDE a cmux workspace on purpose: cmux's control socket is "cmuxOnly" and
-# denies processes outside the cmux session (pm2 double-forks to PPID 1, so it is
-# always denied). Set CMUX_SOCKET_PASSWORD in .env to run under pm2 instead.
+# PokeClaude server supervisor: a restart loop, for when pm2 is not installed.
+# Start the server with tools/start-server.sh, which uses pm2 when it can. Only
+# POKECLAUDE_BACKEND=cmux needs this to run inside a cmux workspace, because cmux's
+# control socket is "cmuxOnly" and denies processes outside the cmux session.
 cd "$(dirname "$0")"
 while true; do
   node src/server/index.js

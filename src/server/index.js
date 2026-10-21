@@ -6,27 +6,43 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import { localRequestAllowed } from './local-http.js';
-import * as cmux from './cmux.js';
+// Which module drives the pens is a flag, not an edit (backend.js). Unset means native:
+// the pens run in our own pty relays and no cmux is needed. POKECLAUDE_BACKEND=cmux
+// drives them through cmux instead. The name `cmux` is kept deliberately - the
+// whole point is that nothing below here knows or cares which one answered.
+import cmux, { name as backendName, isNative } from './backend.js';
 import { createState, applyCmux, applyHook, snapshot, isHollow, markHollow } from './state.js';
 import { normalizeDir } from './paths.js';
 import { readUpload, saveUpload } from './uploads.js';
 import { listCrons, createCron, runCron, deleteCron } from './crons.js';
 import { appendAsh, readAsh } from './ashlog.js';
 import { linkSessions } from './sessions.js';
+import { makeSessionIndex } from './sessionindex.js';
 import { coalesce } from './coalesce.js';
 import { pendingPrompt, parseAsk } from './pending.js';
 import { chooseFolder } from './picker.js';
 import { inputBoxState, READ_LINES, draftOnScreen, queuedOnScreen, boxAction } from './screen.js';
+import { statusFrom } from './nativestatus.js';
+import { diffRows } from '../../public/js/rowdiff.js';
+import { subscriptionStatus } from './subscriptions.js';
 import { makeWatcher, fire, describe, speciesFor, penName, onAppDeliver } from './notify.js';
 import { findNewestTranscript, parseTail, parseConversation, listSessions,
-         listArchive, searchSessions, isTranscriptPath, readConversation } from './transcripts.js';
+         listArchive, searchSessions, isTranscriptPath, readConversation,
+         pageSessions, sessionLimit, sessionFiles, describeSession, searchText } from './transcripts.js';
 import { recall } from './recall.js';
 import { probeAuth, startLogin } from './auth.js';
 import { catalog, spawnCommand, resumeCommand } from './engines.js';
 import { codexByTty, parseCodexConversation, parseCodexTail } from './codexlog.js';
 import { createRoster, rosterEntries } from './roster.js';
+import { stateFile } from './statefiles.js';
 import { ensureRepoConfig, repoConfigPath, claudeBin, expandHome } from './config.js';
 import { buildStaleTowns } from './towns.js';
+import { penPath } from './ptyclient.js';
+
+// Opened from PokeClaude.app after a reboot, the server gets launchd's short PATH and
+// nothing in ~/.local/bin (claude, gws-cli) is on it. Every CLI this server runs, and
+// every pen it starts, inherits this, so fix it once here.
+process.env.PATH = penPath(process.env.PATH);
 
 // 5180 unless told otherwise. A second checkout on the same machine needs its own
 // port, and hooks/pokeclaude-hook.sh reads the same variable so events reach the right
@@ -39,7 +55,9 @@ const sseClients = new Set();
 // The sessions that were running, on disk, so a cmux crash does not lose them. See
 // roster.js. `rosterFresh` is true whenever the server missed the moments before the
 // next poll: at startup, and after any poll where cmux could not be read.
-const roster = createRoster(path.join(root, 'data', 'roster.json'));
+// Per backend: the two host different pens, and sharing this file made the native
+// ranch mark every live cmux session as lost (statefiles.js).
+const roster = createRoster(stateFile(root, 'roster.json', backendName));
 let rosterFresh = true;
 // The desktop app holds one of these. It posts through UNUserNotificationCenter, which
 // is the only API on macOS 26 that will show an alert under our own name and icon; when
@@ -71,14 +89,18 @@ function send(payload) {
 const notifier = makeWatcher();
 function broadcast() {
   const snap = snapshot(state);
-  send({ type: 'state', ...snap, socketOk, usage, crons, auth, restore: roster.lost() });
+  // The panel says different things depending on which backend is driving: a native
+  // pen survives a server restart, so "CMUX RESTARTED" is both wrong and alarming, and
+  // there is no cmux window to open a native pen in.
+  send({ type: 'state', ...snap, socketOk, usage, crons, auth, restore: roster.lost(),
+         backend: backendName });
   notifyTick();
 }
 function notifyTick() {
   for (const alert of notifier.check(snapshot(state).agents, crons)) {
     const note = describe(alert.workspaceId ? {
       ...alert,
-      species: speciesFor(alert.workspaceId),
+      species: speciesFor(alert.species),
       pen: penName(alert.dir),
       // What it was doing, read from the transcript at the moment it stopped doing it.
       // Only for the agent that just changed, so the file read costs nothing per poll.
@@ -145,7 +167,11 @@ async function sampleFooters() {
   const live = [...state.agents.values()].filter(a => a.ref && a.kind !== 'service');
   if (!live.length) return;
   const a = live[footerCursor++ % live.length];
-  const scr = await cmux.readScreen(a.ref, 40);   // the footer scrolls off in 10
+  // readText, not readScreen: the same 40 lines over cmux's socket rather than through
+  // a process spawn, 1.6ms against 207ms, and parseFooter reads both identically (checked
+  // against six live panes). readText falls back to readScreen when the socket is not
+  // there, so the password case still works.
+  const scr = await cmux.readText(a.ref, 40);     // the footer scrolls off in 10
   markHollow(state, a.workspaceId, isHollow(scr));
   const footer = scr.ok ? cmux.parseFooter(scr.stdout)
                         : { model: null, contextPct: null, permissionMode: null };
@@ -184,6 +210,24 @@ async function sampleFooters() {
     if (st !== a.status) { a.status = st; a.since = Date.now(); state.version++; }
   }
   await sampleGit(a);
+}
+
+// Every native pen's status, every tick. cmux wrote a status entry per workspace and
+// applyCmux mapped it; nothing writes one now. The two sources left are better anyway:
+// the hooks, which fire on the event itself, and the pen's own screen, which costs
+// nothing to read when the grid is already in memory. So this is not a sample at all -
+// it is every pen, every tick, for free.
+function sampleNativeStatus() {
+  const now = Date.now();
+  for (const a of state.agents.values()) {
+    if (!a.ref || a.kind === 'service') continue;
+    const scr = cmux.readScreen(a.ref, READ_LINES);
+    const st = statusFrom({
+      hook: a.lastHookStatus || null, hookAt: a.lastHookAt || 0,
+      screen: scr.ok ? scr.stdout : '', was: a.status, now,
+    });
+    if (st !== a.status) { a.status = st; a.since = now; state.version++; }
+  }
 }
 
 // A Codex agent's status, every tick rather than once per round-robin.
@@ -275,6 +319,10 @@ let lastVersion = -1;
 export let socketOk = null;
 async function poll() {
   try {
+    // The pens are relays on disk and they outlive this server, so every tick looks for
+    // ones we are not attached to: after a restart that is all of them, and it is also
+    // how a pen started from another checkout joins the ranch.
+    if (isNative) { await cmux.attachAll(); await cmux.refreshPorts(); }
     const ws = await cmux.listWorkspaces();
     const rows = cmux.readSessionJson();
     // Empty workspace list while the session file shows tabs => socket is denying us.
@@ -299,10 +347,15 @@ async function poll() {
     if (ws.length) {
       if (roster.observe(rosterEntries(state.agents.values()), { fresh: rosterFresh })) state.version++;
       rosterFresh = false;
+      // A reply queued for a pen that died goes to the pen now running its conversation.
+      const live = {};
+      for (const a of state.agents.values()) live[a.workspaceId] = a.codexSessionId || a.procSessionId || null;
+      if (outbox.follow(live)) outbox.kick().catch(e => log({ level: 'error', where: 'outbox', err: String(e) }));
     } else rosterFresh = true;
     if (state.version !== lastVersion) { lastVersion = state.version; broadcast(); }
     else notifyTick();          // the tick that closes a settle window changes nothing
     syncWatchers();
+    if (isNative) sampleNativeStatus();
     await sampleUsage();
     await sampleFooters();
     await sampleCodex();
@@ -312,7 +365,33 @@ async function poll() {
 }
 setInterval(poll, 3000);
 poll();
-try { fs.watch(cmux.sessionJsonPath, () => setTimeout(poll, 150)); } catch {}
+
+// Which backend is driving, and which account the pens spend from. Said out loud at
+// startup because a pen that bills an API key looks exactly like one that bills the
+// subscription - same field, same sprites - so being told is the only way to notice.
+// Kept above the HTTP entry point on purpose. local-http.test.js finds that entry
+// point by searching this file for the line that creates it and evaluating everything
+// from there with a fixed set of names injected, so a free identifier below that line
+// is a ReferenceError in the test - and quoting the line it searches for, as this
+// comment first did, moves where the slice starts.
+(async () => {
+  log({ level: 'info', msg: `pens are driven by the ${backendName} backend` });
+  const subs = await subscriptionStatus();
+  for (const [engine, st] of [['claude', subs.claude], ['codex', subs.codex]]) {
+    log({ level: st.ok ? 'info' : 'warn', msg: `${engine} pens spend from ${st.detail}`, mode: st.mode });
+  }
+  if (subs.redirected.length) {
+    log({ level: 'warn',
+          msg: `set here and would bill around the subscription: ${subs.redirected.join(', ')}`
+             + (isNative ? ' (the relay strips them from every pen)' : ' (cmux pens inherit them)') });
+  }
+})().catch(e => log({ level: 'error', where: 'startup', err: String(e) }));
+// cmux saves a session file and a change to it means a status moved, so the poll is
+// nudged. The native backend has no such file (its statuses come from hooks and from
+// the pens' own screens), and watching null throws straight into the catch.
+if (cmux.sessionJsonPath) {
+  try { fs.watch(cmux.sessionJsonPath, () => setTimeout(poll, 150)); } catch {}
+}
 
 function readBody(req) {
   return new Promise((resolve) => {
@@ -325,8 +404,11 @@ function readBody(req) {
 // The box once the message has gone: { empty, queued }. `queued` means Claude Code
 // was mid-turn and took the message for later, which the panel says instead of "sent".
 async function composerEmpty(ref) {
-  for (let i = 0; i < 8; i++) {
-    await new Promise(r => setTimeout(r, 250));
+  // A 2s budget, not a count of looks: native returns from settle() as soon as a redraw
+  // ends, so eight looks there can take a fraction of the time Claude needs to clear.
+  const until = Date.now() + 2000;
+  while (Date.now() < until) {
+    await cmux.settle(ref, 250);
     const scr = await cmux.readScreen(ref, READ_LINES);
     if (!scr.ok) return { empty: false, queued: false };   // could not look: not evidence of failure
     if (!pendingPrompt(scr.stdout) && !draftOnScreen(scr.stdout)) return { empty: true, queued: queuedOnScreen(scr.stdout) };
@@ -448,7 +530,7 @@ async function deliverMessage(a, text) {
   }
   // Submit once. An uncertain read must not confirm a newly opened picker.
   {
-    await new Promise(r => setTimeout(r, 150));
+    await cmux.settle(a.ref, 150);
     const hit = await cmux.sendKey(a.ref, 'enter');
     if (!hit.ok) {
       log({ level: 'warn', where: 'send', ws: a.ref, failed: 'enter', err: hit.stderr });
@@ -461,7 +543,7 @@ async function deliverMessage(a, text) {
   return reply(502, { error: 'Submission could not be verified. Your message is saved. Review Terminal controls before pressing Enter or retrying.' });
 
 }
-const outbox = createOutbox(path.join(root, 'data', 'reply-outbox.json'), async row => {
+const outbox = createOutbox(stateFile(root, 'reply-outbox.json', backendName), async row => {
   const a = state.agents.get(row.ws);
   if (!a?.ref || terminalBusy.has(row.ws)) return { status: 409, body: { error: 'Waiting for the agent.' } };
   const session = a.codexSessionId || a.procSessionId || a.sessionId;
@@ -483,6 +565,13 @@ const terminalIO = { read: cmux.readScreen, key: cmux.tap, write: cmux.sendLiter
 ensureRepoConfig(root);
 const built = await buildStaleTowns(root, log);
 if (built.length) log({ level: 'info', where: 'town.build', msg: `built ${built.join(', ')}` });
+
+// The PC search. Every session in the repo, both engines, read whole once.
+const sessionIndex = makeSessionIndex({
+  list: sessionFiles,
+  describe: describeSession,
+  read: searchText,
+});
 
 const server = http.createServer(async (req, res) => {
   let releaseTerminal = null;
@@ -568,7 +657,10 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/api/state') return sendJson(res, 200, { ...snapshot(state), socketOk, usage, crons, restore: roster.lost() });
     if (u.pathname === '/api/hook' && req.method === 'POST') {
       const body = await readBody(req);
-      try { applyHook(state, JSON.parse(body)); broadcast(); } catch (e) { log({ level: 'warn', where: 'hook', err: String(e) }); }
+      try { applyHook(state, JSON.parse(body), Date.now(), backendName); broadcast(); }
+      catch (e) { log({ level: 'warn', where: 'hook', err: String(e) }); }
+      // A hook is a pen changing state, often to idle: a waiting reply may go now.
+      outbox.kick().catch(e => log({ level: 'error', where: 'outbox', err: String(e) }));
       return sendJson(res, 200, { ok: true });
     }
     if (u.pathname === '/api/agent') {
@@ -617,6 +709,37 @@ const server = http.createServer(async (req, res) => {
         linked: !!exact, linkedBy: a.procTranscript ? 'process' : (exact ? 'hook' : null),
         sessionId: a.procSessionId || a.sessionId || null, ambiguous });
     }
+    // A pen's screen, live, as the rows that changed. This is what stands in for the
+    // cmux window once nothing else is drawing these terminals: the panel shows the
+    // real thing, in colour, moving. Native only - cmux renders its own screen and we
+    // would only be polling it faster.
+    if (u.pathname === '/api/term' && isNative) {
+      const a = state.agents.get(u.searchParams.get('ws'));
+      if (!a?.ref) return sendJson(res, 404, { error: 'no ref' });
+      const agent = cmux.agentFor(a.ref);
+      if (!agent) return sendJson(res, 404, { error: 'that pen is not attached' });
+      res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache',
+                           connection: 'keep-alive' });
+      let dirty = true, closed = false, keys = null;
+      const onOut = () => { dirty = true; };
+      agent.on('output', onOut);
+      const push = () => {
+        if (closed) return;
+        if (dirty) {
+          dirty = false;
+          const rows = cmux.rowsOf(a.ref) || [];
+          const d = diffRows(keys, rows);
+          keys = d.keys;
+          if (d.full || d.rows.length || d.removed.length) {
+            res.write(`data: ${JSON.stringify({ full: d.full, rows: d.rows, removed: d.removed })}\n\n`);
+          }
+        }
+        setTimeout(push, 50);
+      };
+      push();
+      req.on('close', () => { closed = true; agent.off('output', onOut); });
+      return;
+    }
     if (u.pathname === '/api/screen') {
       const a = state.agents.get(u.searchParams.get('ws'));
       if (!a?.ref) return sendJson(res, 404, { error: 'no ref' });
@@ -643,10 +766,24 @@ const server = http.createServer(async (req, res) => {
     if (u.pathname === '/api/transcript') {
       const tp = u.searchParams.get('path') || '';
       if (!isTranscriptPath(tp)) return sendJson(res, 403, { error: 'not a transcript path' });
-      return sendJson(res, 200, { messages: readConversation(tp, 200) });
+      // `all=1` is find asking for every turn, so "no matches" is true of the whole
+      // conversation and not only of the turns the pane happens to show.
+      const whole = u.searchParams.get('all') === '1';
+      return sendJson(res, 200, { messages: readConversation(tp, 200, { whole }) });
     }
     if (u.pathname === '/api/sessions') {
-      return sendJson(res, 200, { sessions: listSessions(u.searchParams.get('dir') || '') });
+      const dir = u.searchParams.get('dir') || '';
+      const q = u.searchParams.get('q') || '';
+      if (q.trim()) {
+        const t0 = Date.now();
+        const r = await sessionIndex.search(dir, q);
+        log({ level: 'info', where: 'pc.search', q, hits: r.total, ms: Date.now() - t0 });
+        return sendJson(res, 200, { sessions: r.results, total: r.total, more: false });
+      }
+      // Opening the PC is the hint a search may follow: read the transcripts now.
+      sessionIndex.warm(dir).catch(() => {});
+      const limit = sessionLimit(u.searchParams.get('limit'));
+      return sendJson(res, 200, pageSessions(listSessions(dir, limit + 1), limit));
     }
     if (u.pathname === '/api/act' && req.method === 'POST') {
       const { action, ws, text, dir, sessionId, engine, optionIndex, optionLabel, question, screen, key, messageId } = JSON.parse(await readBody(req));
@@ -664,6 +801,7 @@ const server = http.createServer(async (req, res) => {
         const session = a.codexSessionId || a.procSessionId || a.sessionId;
         if (!session) return sendJson(res, 409, { error: 'Still identifying this conversation. Your reply remains saved.' });
         const row = outbox.add(ws, text, messageId, session);
+        outbox.kick().catch(e => log({ level: 'error', where: 'outbox', err: String(e) }));
         return sendJson(res, 200, { ok: true, queued: true, id: row.id });
       }
       if (action === 'cancel-reply') return sendJson(res, 200, { ok: outbox.cancel(ws, messageId) });
@@ -714,10 +852,8 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, result.ok ? 200 : 409, result);
       }
       if (action === 'open') {
-        if (a?.ref) await cmux.selectWorkspace(a.ref);
-        const { exec } = await import('node:child_process');
-        exec('open -a cmux');
-        return sendJson(res, 200, { ok: true });
+        const r = await cmux.showWorkspace(a?.ref);
+        return sendJson(res, 200, { ok: r.ok, useTerminal: !!r.useTerminal });
       }
       if (action === 'kill') {
         if (!a?.ref) return sendJson(res, 400, { error: 'no ref' });
@@ -757,8 +893,18 @@ const server = http.createServer(async (req, res) => {
         catch (e) { failed.push({ sessionId: s.sessionId, error: e.message }); continue; }
         if (!fs.existsSync(s.dir)) { failed.push({ sessionId: s.sessionId, error: `${s.dir} no longer exists` }); continue; }
         const r = await cmux.newWorkspace(s.engine === 'codex' ? '◑ resume codex' : '◑ resume', s.dir, command);
-        if (r.ok) resumed++;
-        else {
+        if (r.ok) {
+          resumed++;
+          // Opening is not running. A resume that dies at once (a missing binary, a
+          // gone conversation) goes back on the list, or the session is lost for good.
+          setTimeout(() => {
+            const code = cmux.exitCode?.(r.ref);
+            if (code === undefined) return;
+            roster.giveBack([s]);
+            log({ level: 'warn', where: 'restore', sessionId: s.sessionId, msg: `exited with code ${code}; back on the lost list` });
+            broadcast();
+          }, 8000);
+        } else {
           roster.giveBack([s]);
           failed.push({ sessionId: s.sessionId, error: r.stderr || 'new-workspace failed' });
         }
@@ -924,7 +1070,7 @@ const server = http.createServer(async (req, res) => {
         releaseTerminal = () => terminalBusy.delete(agent.workspaceId);
       }
       const result = await startAgent(r.ref, prompt, {
-        read: cmux.readScreen, type: cmux.send, key: cmux.press,
+        read: cmux.readScreen, type: cmux.send, key: cmux.press, exited: cmux.exitCode,
         sleep: ms => new Promise(resolve => setTimeout(resolve, ms)),
       });
       log({ level: result.ok ? 'info' : 'error', where: 'spawn', ref: r.ref,

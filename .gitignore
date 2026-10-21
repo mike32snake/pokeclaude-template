@@ -17,3 +17,7 @@ config/repos.json
 # ABSOLUTE directory, which is the key the client matches a live agent's cwd against.
 # The server builds them on boot from config/repos.json.
 public/art/town-*.json
+
+# Relay sockets, metadata and logs for natively-hosted pens (tools/pty-agent.py).
+# They live in ~/.pokeclaude/pty, but keep any stray local copy out of git.
+.pokeclaude/

@@ -22,6 +22,18 @@ test('a resumed session names the transcript it continued into', () => {
   assert.equal(m.get('ttys005').resumed, true);
 });
 
+// A native pen runs `claude ...` through the shell's PATH, so ps shows the bare name.
+// Reading only "/claude" left every native pen unlinked, out of the roster, and gone
+// for good when the Mac rebooted on 2026-09-30.
+test('a claude started by bare name off the PATH is still read', () => {
+  const m = parsePs([
+    line(7, 'ttys008', 'claude --resume 73eef571-50fc-4268-93d8-60a0a9a92bf3'),
+    line(8, 'ttys009', `claude --model opus --session-id 11111111-2222-3333-4444-555555555555 ${SETTINGS}`),
+  ].join('\n'));
+  assert.equal(m.get('ttys008').sessionId, '73eef571-50fc-4268-93d8-60a0a9a92bf3');
+  assert.equal(m.get('ttys009').sessionId, '11111111-2222-3333-4444-555555555555');
+});
+
 test('a process with no tty cannot belong to a workspace', () => {
   assert.equal(parsePs(line(1, '??',
     `/Users/m/.local/bin/claude --session-id 11111111-2222-3333-4444-555555555555`)).size, 0);

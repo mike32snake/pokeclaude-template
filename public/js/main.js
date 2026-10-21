@@ -21,22 +21,15 @@ const feedWrap = document.getElementById('feed-wrap');
 
 // Collapsible side panes. Collapsing gives the field its width back, so the map
 // can hold a bigger integer zoom; every toggle re-runs resize().
-let panelWidthBeforeCollapse = null;
+let refitPanel = () => {};          // set by initDrag
 function setPane(el, key, collapsed) {
   el.classList.toggle('collapsed', collapsed);
   // The drag handle sets inline widths, which would beat the .collapsed rule. Clear
-  // them while collapsed and put the dragged width back on expand.
+  // them while collapsed and put the dragged width back on expand, refitted to the
+  // window as it is now (every drag stores its width, "full" included).
   if (el === panelEl) {
-    if (collapsed) {
-      // Remember the exact width we are collapsing from, so expanding restores it
-      // rather than whatever happens to be in storage.
-      if (el.style.width) panelWidthBeforeCollapse = el.style.width;
-      el.style.width = el.style.minWidth = el.style.maxWidth = '';
-    } else {
-      let w = panelWidthBeforeCollapse;
-      if (!w) { try { w = localStorage.getItem('pc.panelW'); } catch {} if (w) w += 'px'; }
-      if (w) el.style.width = el.style.minWidth = el.style.maxWidth = w;
-    }
+    if (collapsed) el.style.width = el.style.minWidth = el.style.maxWidth = '';
+    else refitPanel();
   }
   const btn = el.querySelector('button');
   if (btn) {
@@ -150,19 +143,34 @@ function markGrid(size) {
   document.querySelectorAll('#grid-ctl button').forEach(b =>
     b.classList.toggle('on', b.dataset.grid === String(size)));
 }
-// Drag the divider to trade panel width against field width. Persisted.
+// Drag the divider to trade panel width against field width. Persisted. Dragged all
+// the way right, the panel takes the whole window, stored as "full" so it stays full
+// on a bigger screen instead of becoming a fixed width that no longer reaches.
 function initDrag() {
   const bar = document.getElementById('drag');
   if (!bar) return;
+  // What the panel and the field share: the row, less the activity pane and the part
+  // of the divider that does not overlap the panel.
+  const room = () => panelEl.parentElement.clientWidth - feedWrap.offsetWidth
+    - (bar.offsetWidth + parseFloat(getComputedStyle(bar).marginLeft || 0));
   const apply = (px) => {
-    const w = panelWidth(px, innerWidth);
+    const r = room();
+    const w = panelWidth(px, r);
     panelEl.style.width = w + 'px';
     panelEl.style.maxWidth = w + 'px';
     panelEl.style.minWidth = w + 'px';
-    try { localStorage.setItem('pc.panelW', String(w)); } catch {}
+    try { localStorage.setItem('pc.panelW', w >= r ? 'full' : String(w)); } catch {}
     resize();
   };
-  try { const saved = localStorage.getItem('pc.panelW'); if (saved) apply(Number(saved)); } catch {}
+  // Re-apply the stored width against the current room. Nothing stored means the
+  // CSS default, which needs no help.
+  const refit = () => {
+    if (panelEl.classList.contains('collapsed')) return;
+    let saved = null; try { saved = localStorage.getItem('pc.panelW'); } catch {}
+    if (saved) apply(saved === 'full' ? Infinity : Number(saved));
+  };
+  refitPanel = refit;
+  refit();
   bar.addEventListener('mousedown', (e) => {
     e.preventDefault();
     bar.classList.add('dragging');
@@ -177,9 +185,10 @@ function initDrag() {
   });
   // A window dragged narrower has to pull an over-wide panel back with it, or the
   // field is squeezed out of existence by a width that was fine on a bigger screen.
-  addEventListener('resize', () => {
-    if (panelEl.style.width) apply(parseFloat(panelEl.style.width));
-  });
+  // Opening or closing the activity pane changes the room too; wait for its width
+  // transition to finish, or the room is measured mid-animation.
+  addEventListener('resize', refit);
+  feedWrap.addEventListener('transitionend', (e) => { if (e.propertyName === 'width') refit(); });
   bar.addEventListener('dblclick', () => {            // double click resets
     panelEl.style.width = panelEl.style.maxWidth = panelEl.style.minWidth = '';
     try { localStorage.removeItem('pc.panelW'); } catch {}
@@ -315,7 +324,7 @@ async function boot() {
   const renderAuth = mountAuthBar(document.getElementById('auth-bar'), {
     onFix: async (id) => {
       const r = await api.authLogin(id).catch((e) => ({ error: String(e) }));
-      ui.toast(r.error ? `sign-in failed: ${r.error}` : (r.warning || 'Sign-in opened. Complete it in Brave or the selected cmux tab; the login strip will recheck automatically.'));
+      ui.toast(r.error ? `sign-in failed: ${r.error}` : (r.warning || 'Sign-in opened. Complete it in your browser or the selected terminal; the login strip will recheck automatically.'));
     },
     onRefresh: async () => {
       renderAuth(null);

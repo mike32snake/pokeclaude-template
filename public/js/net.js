@@ -14,6 +14,7 @@ export function connect() {
     if (s.crons) state.crons = s.crons;
     if (s.auth) state.auth = s.auth;
     if (s.restore) state.restore = s.restore;
+    if (s.backend) state.backend = s.backend;
     for (const fn of listeners) fn(state);
   };
   es.onerror = () => setTimeout(() => { es.close(); connect(); }, 3000);
@@ -21,14 +22,16 @@ export function connect() {
 export const api = {
   agent: (ws) => fetch(`/api/agent?ws=${encodeURIComponent(ws)}`).then(r => r.json()),
   screen: (ws) => fetch(`/api/screen?ws=${encodeURIComponent(ws)}`).then(r => r.json()),
-  sessions: (dir) => fetch(`/api/sessions?dir=${encodeURIComponent(dir)}`).then(r => r.json()),
+  sessions: (dir, limit = 12) => fetch(`/api/sessions?dir=${encodeURIComponent(dir)}&limit=${limit}`).then(r => r.json()),
+  searchSessions: (dir, q, opts) => fetch(`/api/sessions?dir=${encodeURIComponent(dir)}&q=${encodeURIComponent(q)}`, opts).then(r => r.json()),
   archive: (dir) => fetch('/api/archive' + (dir ? `?dir=${encodeURIComponent(dir)}` : '')).then(r => r.json()),
   search: (q, dir) => fetch(`/api/search?q=${encodeURIComponent(q)}` +
     (dir ? `&dir=${encodeURIComponent(dir)}` : '')).then(r => r.json()),
   ash: (limit) => fetch('/api/ash' + (limit ? `?limit=${limit}` : '')).then(r => r.json()),
   cronLog: (label) => fetch(`/api/cronlog?label=${encodeURIComponent(label)}`).then(r => r.json()),
   cron: (body) => fetch('/api/cron', { method: 'POST', body: JSON.stringify(body) }).then(r => r.json()),
-  transcript: (p) => fetch(`/api/transcript?path=${encodeURIComponent(p)}`).then(r => r.json()),
+  transcript: (p, all = false) => fetch(`/api/transcript?path=${encodeURIComponent(p)}` +
+    (all ? '&all=1' : '')).then(r => r.json()),
   upload: (file) => fetch('/api/upload', {
     method: 'POST', headers: { 'x-filename': uploadHeaderName(file.name) }, body: file,
   }).then(r => r.json()),

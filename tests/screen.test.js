@@ -228,3 +228,36 @@ test('a box refused for a reason other than a draft passes its reason through', 
 test('Codex queue shortcut is outside the composer text', () => {
  assert.equal(draftOnScreen('› hello\n\n  tab to queue message    67% context left'), 'hello');
 });
+
+// Captured from the multiselect pen on 2026-09-30: two Escapes on an empty box open
+// Rewind, whose cursor is a "❯" too. It was read as a draft, so every queued reply was
+// refused for "unsent text" every 2s until the Mac rebooted, and the reason pointed at
+// a draft nobody typed instead of at the menu.
+const REWIND = ['⏺ Done.', '',
+  '▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ new task? /clear to save 310.3k tokens ▔',
+  '     Rewind',
+  '     Restore the code and/or conversation to the point before…',
+  '       ↑ 5 more',
+  '       whats included in the 2027 Year-Round Supporter Package for hbma?',
+  '       No code changes',
+  '       assume this is there. add it the hbma section…',
+  '       No code changes',
+  '     ❯ (current)',
+  '     Enter to continue · Esc to cancel'].join('\n');
+
+test('an open menu is not a draft, and the reason says a menu is open', () => {
+  assert.equal(draftOnScreen(REWIND), '');
+  const r = inputBoxState(REWIND);
+  assert.equal(r.ok, false);
+  assert.equal(r.draft, undefined);
+  assert.match(r.reason, /menu is open/);
+});
+
+// Every message you send is echoed into the scrollback as "❯ your words". Only the "❯"
+// straight under the box's top rule is the input box.
+test('a message echoed into the scrollback is not the input box', () => {
+  const s = ['❯ open in brave', '', '⏺ Opened it.', '', '  ⎿  Interrupted', ''].join('\n');
+  assert.equal(draftOnScreen(s), '');
+  assert.equal(draftOnScreen(['❯ open in brave', '', '⏺ Opened it.', '', '────────', '❯ ', ...FOOTER].join('\n')), '');
+  assert.equal(draftOnScreen(['❯ open in brave', '', '────────', '', '❯ typed', ...FOOTER].join('\n')), 'typed');
+});

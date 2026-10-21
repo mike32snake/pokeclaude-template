@@ -142,7 +142,7 @@ test('a pane that cannot be read for a moment is read again, not skipped', async
   let n = 0, written = false;
   const io = {
     async write() { written = true; return { ok: true }; }, async key() { return { ok: true }; },
-    async read() { n++; return n < 3 ? { ok: false, stdout: '' } : { ok: true, stdout: written ? '❯ one' : '❯ ' }; },
+    async read() { n++; return n < 3 ? { ok: false, stdout: '' } : { ok: true, stdout: written ? '────────\n❯ one' : '────────\n❯ ' }; },
     async sleep() {},
   };
   const r = await typeInto('workspace:1', 'one', io);

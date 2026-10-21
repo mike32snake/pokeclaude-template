@@ -9,6 +9,11 @@ const fail = error => ({ ok: false, error });
 export async function startAgent(ws, prompt, io) {
   let trusted = false, ready = false;
   for (let n = 0; n < 90; n++) {
+    // A pen that died will never draw a composer. Say why now, not after 90 seconds.
+    const code = io.exited?.(ws);
+    if (code !== undefined && code !== null) {
+      return fail(`The agent exited with code ${code}${code === 127 ? ' (its command was not found)' : ''}.`);
+    }
     const scr = await io.read(ws, READ_LINES);
     if (scr.ok) {
       const gate = trustGate(scr.stdout);

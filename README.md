@@ -55,7 +55,9 @@ its feet. The plot's sign carries a count so you can see it without reading bubb
 ## What it needs
 | | |
 |---|---|
-| [cmux](https://github.com/manaflow-ai/cmux) | Where the agents actually run. PokeClaude reads its workspace list; it does not replace it. |
+| Python 3 | Hosts each pen's pty (`tools/pty-agent.py`). The pens outlive the server. |
+| pm2 | Optional. `tools/start-server.sh` uses it to keep the server up; without it, the script runs `run-server.sh` detached. |
+| [cmux](https://github.com/manaflow-ai/cmux) | Optional. Only for the old backend, `POKECLAUDE_BACKEND=cmux`. |
 | Node 20 or newer | No npm dependencies at all. `npm test` is `node --test`. Developed and verified on 23. |
 | Claude Code CLI | `claude` on your PATH. Set `POKECLAUDE_CLAUDE_BIN` if it lives somewhere unusual. |
 | Codex CLI | Optional. Without it, Codex pens and Codex sessions simply do not appear. |
@@ -63,7 +65,7 @@ its feet. The plot's sign carries a count so you can see it without reading bubb
 
 ## Run it
     tools/fetch-sprites.sh   # once: Pokemon sprites are not committed
-    ./run-server.sh          # inside a cmux workspace (see "The cmux constraint")
+    tools/start-server.sh    # under pm2; see "The cmux constraint" for the old backend
     open http://localhost:5180
 
 Your pens live in `config/repos.json`. If a clone does not have one, the server copies
@@ -82,8 +84,9 @@ from the field instead. Nothing else has to change: the server matches a live ag
 pen by its working directory.
 
 **Which CLI a pen runs.** `src/server/engines.js` is the only file that builds a command
-line. `CLAUDE_MODELS` is the Claude Code list; Codex's comes from its own
-`~/.codex/models_cache.json` so a model is usable the day it ships. Adding a third
+line. The Claude model list is read from the catalog Claude Code caches under
+`~/.claude/cache/model-catalog/` (`src/server/models.js`), and Codex's from its own
+`~/.codex/models_cache.json`, so a model is usable the day it ships. Adding a third
 engine means adding a `spawnCommand` and a `resumeCommand` case there, and a way to read
 its transcripts alongside `transcripts.js` (Claude Code's JSONL) and `codexlog.js`
 (Codex's own log). Everything downstream, the field, the panel, the PC, the archive,
@@ -154,10 +157,11 @@ again to go back to auto-fit. Collapse state and zoom persist in localStorage.
 blocked count (`(11) PokeClaude`) so you can see it from any other browser tab.
 
 ## The cmux constraint
-cmux's control socket is `cmuxOnly`: it refuses processes outside the cmux session.
-pm2 double-forks to PPID 1, so a pm2-supervised server is always denied. Two options:
+This applies only to the old backend, `POKECLAUDE_BACKEND=cmux`. The default native
+backend needs no cmux. cmux's control socket is `cmuxOnly`: it refuses processes outside
+the cmux session, so a pm2-supervised cmux server is denied. Two options:
 
-1. Run under cmux (default): `run-server.sh` restarts on crash.
+1. `POKECLAUDE_BACKEND=cmux tools/start-server.sh` opens a cmux workspace for it.
 2. Set a socket control password in cmux Settings, put it in `.env` as
    `CMUX_SOCKET_PASSWORD=...`, then pm2 works normally.
 
@@ -228,6 +232,32 @@ last opened, `ALL REPOS` widens it again.
 Matching is literal, case-insensitive, AND across terms, over message text (tool noise is
 excluded from matching so a hit is always something that was actually said). Cheap
 substring reject first, full parse only on candidate files. No embeddings, no tokens.
+
+## Find
+`Cmd+F` in a conversation searches the whole conversation, not only the turns on
+screen. On the agent list it opens the archive search instead.
+
+The PC (a repo's past sessions) has its own search box. It searches every session in
+that repo by what was said. Opening the PC loads the transcripts into memory in the
+background, so a search does not stall the server.
+
+## Proof (optional)
+A pen can show whether its last turn checked its work: `proof: verified: tests`, or a
+red `no proof`. The "finished" notification says the same. PokeClaude does not decide
+this itself. A Stop hook of your own decides, and posts the result to the server:
+
+    curl -s -m 1 -X POST http://localhost:5180/api/hook \
+      -H 'Content-Type: application/json' \
+      -d '{"agentId":"'"$POKECLAUDE_AGENT_ID"'","cmuxWorkspaceId":"'"$CMUX_WORKSPACE_ID"'",
+           "event":{"hook_event_name":"VerifyResult","session_id":"<session id>",
+                    "verify":{"state":"verified","evidence":["tests"],"files":2,"at":<epoch ms>}}}'
+
+A pen's shell has `POKECLAUDE_AGENT_ID` set, so the hook knows which pen it is in. Outside
+a pen, skip the post.
+
+`state` is `verified`, `unverified`, `blocked` or `none`. `evidence` takes `tests`,
+`browser`, `image`, `local-request`, `render`, `ran-script` or `review`. Anything else is
+dropped (`public/js/proof.js`). Without such a hook, no label is drawn.
 
 ## Services vs agents
 A cmux workspace that is listening on a port and has no Claude session is a **service**
@@ -342,13 +372,13 @@ Shelter art is generated, not copied: `tools/gen_buildings.py` draws each hut
 telescope, gear, banner, envelope, globe...). Add a theme there to add a type.
 
 ## Tests
-    npm test        # 20 tests, all must pass
+    npm test        # all tests must pass
 
 Covers sign truncation, path case-normalization, the poll/hook state reducer,
 transcript parsing, and ranch geometry: the map fits a laptop screen at 2x, pens
 never overlap, and every work spot, gate and hut door is reachable from spawn.
 
 ## Keep it local
-The terrain tiles and trainer sprite derive from Pokémon art, and the Pokémon
-overworld sprites come from the veekun pack, fetched onto your machine and never
-committed. See ART.md. Fine on localhost. Do not host it anywhere.
+The sheds, terrain tiles and trainer sprites are drawn from scratch by the
+generators in `tools/`. The Pokémon overworld sprites come from the veekun pack,
+fetched onto your machine and never committed. See ART.md. Fine on localhost. Do not host it anywhere.

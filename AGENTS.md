@@ -1,22 +1,24 @@
 # PokeClaude
 
 A GBA-style ranch for your live Claude Code agents. Each PEN = a repo, each Pokemon
-in it = a running cmux workspace with Claude in it. The whole map fits one screen at an
+in it = a running Claude (or Codex) in a pty relay we own (`tools/pty-agent.py`). cmux is
+the old backend, kept behind `POKECLAUDE_BACKEND=cmux`. The whole map fits one screen at an
 integer zoom; the camera never scrolls. Localhost only.
 
 ## Build & Test
-- `npm run dev` — start the server on http://localhost:5180, in the foreground, inside a
-  cmux workspace. To relaunch it without opening a terminal tab by hand, give cmux its
-  own workspace and let it run the supervisor:
-
-      /Applications/cmux.app/Contents/Resources/bin/cmux new-workspace \
-        --name "pokeclaude server" --cwd <repo> --command "./run-server.sh"
-
-  Never start it with `nohup ... &` or pm2. Both reparent the process to PPID 1, and
-  cmux's socket is cmuxOnly: the server then serves the page but every cmux call is
-  denied, so titles, branches, models and service pens all quietly go missing. The
-  symptom is "cmux socket denied" in the log and `socketOk:false` on /api/state.
-  `socketOk` is null until a denial happens, so null is the healthy value, not an error.
+- `tools/start-server.sh` — start the server on http://localhost:5180. On the native
+  backend (the default) it runs under pm2 as `pokeclaude`; `pm2 restart pokeclaude`
+  picks up changes, `pm2 logs pokeclaude` shows the log. Restarting it never kills a
+  pen: the relays outlive the server and it reattaches. PokeClaude.app runs this same
+  script, so there is one way to start it.
+- Only `POKECLAUDE_BACKEND=cmux` must run inside a cmux workspace (the script opens one).
+  cmux's socket is cmuxOnly, so a cmux-backed server under pm2 serves the page while
+  every cmux call is denied. The symptom is "cmux socket denied" in the log and
+  `socketOk:false` on /api/state. `socketOk` is null until a denial happens, so null is
+  the healthy value, not an error.
+- "Open tab" belongs to the backend (`showWorkspace`). Never launch cmux from index.js:
+  on native it opened an app that holds none of the pens. Native answers
+  `useTerminal`, and the panel opens the live terminal instead.
 - `npm test` — node --test; all tests must pass before any change is "done" (TDD)
 - `tools/build-app.sh` — build PokeClaude.app and install it into /Applications. It
   MUST land in /Applications: the identical bundle run from anywhere else is refused
@@ -105,7 +107,14 @@ Never import upward.
 - The context percentage is MEASURED from the transcript, not scraped: assistant turns
   record input + cache_creation + cache_read tokens, and the newest turn is the current
   context. The screen cannot be trusted for it at any pane width. The only guess is the
-  denominator: a "(1M context)" model label means 1M, everything else means 200k.
+  denominator, and it is NOT guessed from the model family: Opus 5.5, Sonnet 5.5 and
+  Opus 5 are all 1M by default and Claude Code prints nothing in the label to say so,
+  which measured a 107k Opus 5.5 session at 54% of a 200k window. `contextWindow`
+  (cmux.js) takes "(1M context)", a `[1m]` suffix and Fable/Mythos from the name, and
+  everything else from `readLargeWindowNames` (models.js). Match WHOLE names, never
+  substrings: "Sonnet 5" is a 200k model and "Sonnet 5.5" is not, and one contains the
+  other. `useLargeWindows` exists so a test supplies its own set instead of the
+  machine's - without it, footer.test.js passes or fails on what the CLI last cached.
 - permissionMode is written into the transcript on every prompt. Prefer that over the
   footer line, which is only there when the pane is wide enough to print it.
 - The footer must be read at ~40 lines. At 10 it scrolls off whenever a picker is open.
@@ -120,13 +129,13 @@ Never import upward.
 - NOTHING in the page may depend on window.confirm/alert/prompt. Inside PokeClaude.app
   a WKWebView answers every JS dialog as if Cancel was clicked, so a confirm-gated
   button does nothing at all and says nothing: that is how KILL, STOP and cron delete
-  were dead in the app while they worked in Brave. Destructive buttons ask with
+  were dead in the app while they worked in a browser. Destructive buttons ask with
   armButton (public/js/arm.js): click to arm, click again to act, cold after 6s. The app
   now implements WKUIDelegate too, but the page must not need it.
-- Links in PokeClaude.app open in Brave through `openOutside()` in `app/main.swift`. A
+- Links in PokeClaude.app open in the default browser through `openOutside()` in `app/main.swift`. A
   WKWebView silently drops every target="_blank" link and window.open() unless the UI
   delegate implements createWebViewWith, so chat links did nothing in the app while they
-  worked in Brave. A plain link off localhost:5180 goes out too, or it would replace the
+  worked in a browser. A plain link off localhost:5180 goes out too, or it would replace the
   field with no way back. Only http, https and mailto leave the app. After editing the
   Swift, run tools/build-app.sh and relaunch the app.
 - /api/pick opens the macOS folder dialog through osascript (src/server/picker.js) and
@@ -476,9 +485,14 @@ Never import upward.
   above passed every test, exited 0, and delivered nothing. What proves delivery is the
   macOS notification database, not an exit code:
   `sqlite3 "$HOME/Library/Group Containers/group.com.apple.usernoted/db2/db" "select a.identifier, datetime(r.delivered_date + 978307200,'unixepoch','localtime') from record r join app a on a.app_id=r.app_id order by r.delivered_date desc limit 5;"`
-- The species in a notification comes from the same hash the field draws with
-  (`workspaceId + 'v2'`). `tests/notify.test.js` imports the client's `hash` and checks
-  they agree: the Pokemon in the alert must be the Pokemon on the pen.
+- No two Pokemon on the field are the same species, and none is Pikachu (the player).
+  The hash (`workspaceId + 'v2'`) only says where an agent starts looking;
+  `assignSpecies()` in `public/js/species.js` gives it the first free one from there and
+  remembers it, so a newcomer never takes a Pokemon that is already out. The SERVER
+  assigns agents in `snapshot()` (`species` is a DEX index) and the field draws that
+  value; crons are only known to the client, so `World.sync` gives them what is left.
+  A notification reads `species` off the snapshot, never recomputes it: a second copy
+  of the rule would name a different Pokemon than the one on the pen.
 - `cronTrouble()` in the server duplicates two rules from `cronState()` in
   `public/js/crons.js`, because the server does not import client modules.
   `tests/notify.test.js` runs both over the same jobs, so the copies cannot drift.
@@ -504,6 +518,10 @@ Never import upward.
   restored from yesterday's wider screen, a window too narrow for both halves, and a
   corrupt stored value. The window `resize` listener re-applies it, or a panel sized on
   a big screen squeezes the field out of existence on a small one.
+- The panel may take the whole width (dragged past halfway into the field's minimum, it
+  snaps to full). Full is stored as `pc.panelW = "full"`, not as a pixel width: a number
+  would stop short of the edge on a bigger window. The room is the row less the activity
+  pane, so toggling that pane must refit the panel, after its width transition ends.
 - The auth strip (`src/server/auth.js`, `public/js/authbar.js`) asks each tool's OWN
   status command and shows what it said: `gws-cli auth status -a`, `gh auth status`,
   `vercel` `whoami`, Slack `auth.test`, `claude auth status`, `codex login status`.
@@ -524,6 +542,189 @@ Never import upward.
   list of those commands. The strip is a flex sibling under `#stage` inside
   `#stage-col`, not an absolute child of it: an absolute child of a scroll box scrolls
   away with the field once zoomed in.
+- The TERMINAL SURFACE ID IS CACHED, one lookup per terminal (`surfaces.js`). It used
+  to be looked up on every read and every keypress with `cmux rpc surface.list`, which
+  is a PROCESS SPAWN: 188ms against 1ms for the same call over cmux's socket. That made
+  the socket path pointless, because every 1ms socket call sat behind a 188ms spawn
+  working out where to send it, and typeInto's poll-per-line turned a 40-line paste into
+  ~320 spawns in a burst. That is what "cmux falls over when there are too many agents"
+  was: its CLI helper aborting inside NSFileHandle writeData:, killed mid-write when our
+  own timeout closed its pipe. readText went 219ms -> 1.6ms. Every call goes through
+  `withSurface`, never the cache directly, because a cached id whose terminal has gone
+  must be dropped - cmux says "Terminal surface not found", which is also the string
+  `isHollow` reads. Any OTHER failure keeps the cached id: a timeout is a call that did
+  not happen, not evidence the surface moved, and re-looking-up on those puts the spawn
+  back on the hot path.
+- sampleFooters reads with `readText`, not `readScreen`. Same 40 lines, over the socket
+  rather than a spawn, and parseFooter reads both identically (checked against six live
+  panes). `readScreen` still costs one spawn for the read itself.
+- THE PREVIEW SERVER IS BEHIND `localRequestAllowed` (local-http.js), the same guard
+  index.js uses, and it was not at first. A localhost server is not private: any page in
+  your browser can POST to it, and a `<form enctype="text/plain">` is a SIMPLE request,
+  so there is no CORS preflight and therefore no CORS protection. `readBody` parsed that
+  body as JSON regardless of its content type, and `/api/spawn` RUNS A COMMAND, so any
+  website you visited could have run one here. POSTs now require `application/json`,
+  which forces a preflight, and every route is behind the guard - reading a screen is
+  the contents of your terminals, not a lesser case. Static files are contained against
+  `public/`, not the repo root: `.env` is at the root and holds CMUX_SOCKET_PASSWORD.
+- NOTHING ON A PAGE BUILDS HTML FROM A STRING except through `renderRun` (termview.js),
+  which escapes before it styles. A pen runs whatever it was told to, and anything it
+  runs can print at its own terminal and set its own window title with one printf, so
+  the screen is attacker-controlled by definition. Agent ids and directories come off
+  disk, where any relay can write them, so the picker builds `<option>` elements rather
+  than markup.
+- A guard test asserts the OUTCOME, not the status code. Writing these I got one case
+  wrong - fetch() silently drops a `Host` header, so the request was genuinely local,
+  the guard correctly allowed it, and the command RAN. Status codes alone would not have
+  shown that; a marker file the command would have created does.
+- EACH BACKEND KEEPS ITS OWN STATE FILES (`statefiles.js`). The two host DIFFERENT
+  PENS, so "which sessions were running" and "which replies are owed" belong to one of
+  them. Sharing `data/roster.json` meant running the native server beside the live cmux
+  one made the native ranch, which could see its own single pen, rewrite the file
+  marking all ten live cmux sessions as lost - and the next thing you would
+  have seen on the ranch you actually work in is "CMUX RESTARTED, 10 sessions stopped",
+  about ten agents that were running perfectly well. cmux keeps its existing paths so
+  none of the existing history moves; anything else gets `name.<backend>.json` beside it.
+- THE PANEL'S LIVE TERMINAL DRAWS ONLY THE ROWS THAT HAVE CONTENT. Fifty row divs with
+  the content in the top eleven, scrolled to the bottom, is a black box - which is what
+  it was until I looked at it. Same reason `toText` counts back from the last row of
+  content rather than the last row of the grid.
+- MIGRATING A PEN IS A RESUME, NOT A COPY (`migrate.js`, `tools/migrate-to-native.js`).
+  A cmux pen is a process, a directory and a session id; a native pen running
+  `claude --resume <id>` in that directory is the SAME conversation, appending to the
+  same transcript. The plan is printed and changes nothing until `--run`. Three rules,
+  all about not losing work: a session is never moved twice (two processes would append
+  to one transcript, which is why `--close-cmux` closes the old tab only AFTER the new
+  pen has drawn its own footer); a pen is never dropped without a reason being printed;
+  and a pen that is WORKING is left alone, because resuming mid-turn kills the process
+  writing that answer and the transcript keeps completed turns, not half-written ones.
+  The pen the server itself runs in is excluded by CMUX_WORKSPACE_ID.
+- A SESSION ID FROM THE PROCESS TABLE BEATS ONE FROM A HOOK, and the plan says which it
+  used. `procSessionId` is what that terminal is actually running; `a.sessionId` may
+  have come from a hook, and a hook outlives the process that sent it. Both are in the
+  snapshot now so a tool reading `/api/state` can tell them apart.
+- A NATIVE PEN'S TERMINAL IS LIVE IN THE PANEL (`/api/term`, ui.js `showTerminal`).
+  This is what stands in for having a cmux window: the real screen, in colour, moving,
+  next to the field. Rows that changed, never the whole grid. The text every terminal
+  action is checked against is DERIVED FROM THE SAME ROWS (`termview.rowsText`) rather
+  than shipped alongside them, and a test holds `rowsText` and `vt.toText` together
+  against real captures - if the page derives a different string from the same rows, a
+  keystroke is refused for a change that never happened, or accepted after one that did.
+  A cmux pen keeps the old poll-and-refresh, because cmux renders its own screen.
+- LISTENING PORTS ARE A WALK UP THE PARENT CHAIN (`ports.js`), not a lookup: `npm run
+  dev` forks node which forks the bundler, and the bundler binds the port. state.js uses
+  this to tell a service from an agent, and cmux only ever reported it intermittently.
+  lsof is cached, and a failed lsof keeps the last answer rather than reporting that
+  everything stopped listening - which would turn every service back into an agent.
+- WHICH BACKEND DRIVES THE PENS IS A FLAG, NOT AN EDIT (`backend.js`).
+  `POKECLAUDE_BACKEND=native ./run-server.sh` drives them from our own pty; unset means
+  cmux, which is still the default and still what every pen runs on. index.js imports
+  the CHOSEN module under the name `cmux` on purpose - nothing below that line knows
+  which one answered. A name that is not a backend throws at startup rather than
+  falling back, because a typo that silently kept cmux looks like the switch having no
+  effect. `tests/backend.test.js` checks the two expose the same surface, and it is the
+  real "can we switch yet" test.
+- A PEN SPENDS FROM THE SUBSCRIPTION, and now something enforces it. `claude` prefers
+  ANTHROPIC_API_KEY over its Keychain login and `codex` prefers OPENAI_API_KEY over the
+  ChatGPT plan, so ONE variable moves every pen onto metered billing with nothing on the
+  field looking any different. A pen runs under `zsh -lc`, a LOGIN shell, so the profile
+  is read too - and a profile with, say, a claude-bedrock function is one `source` away from
+  exporting a Bedrock token. `subscriptions.js` holds the list, the relay strips it from
+  every pen, `tests/ptyagent.test.js` proves the strip against a live pen (which is what
+  stops the two drifting), and the server says at startup what each engine will spend.
+- A PEN MUST FIND `claude` AFTER A REBOOT. `zsh -lc` reads .zprofile, never .zshrc, and
+  the pen inherits the SERVER's PATH. Opened from PokeClaude.app after a reboot, the
+  server has launchd's short PATH with no ~/.local/bin, so every new pen and every
+  resume died with exit 127 while the ranch said only "did not become ready" after 90s.
+  `penPath()` (ptyclient.js) puts the user install dirs back, once at server startup
+  and again on every relay. startAgent now fails at once with the exit code, and a
+  restore that exits within 8s goes back on the lost list instead of vanishing.
+- EVERY CLAUDE PEN IS GIVEN ITS SESSION ID (`--session-id`, engines.js). linkSessions
+  reads the id off the claude process's own command line, and a pen started without one
+  had no link but the hooks - which live in memory, so a server restart lost them, and a
+  blocked agent never fires another to rebuild it. This fixed both backends; it was not
+  a native-only gap.
+- A NATIVE PEN'S STATUS COMES FROM THE HOOKS AND ITS OWN SCREEN (`nativestatus.js`).
+  cmux wrote a `claude_code` status entry and applyCmux mapped it; nothing writes one
+  now. A question on screen beats everything, then a hook fresher than
+  HOOK_FRESH_MS, then the screen. It is every pen every tick rather than a round robin,
+  because reading a grid already in memory is free. This is the rule sampleCodex always
+  used, since cmux never wrote entries for Codex pens either.
+- ONE HOOK SERVES BOTH BACKENDS. cmux exports CMUX_WORKSPACE_ID and the relay exports
+  POKECLAUDE_AGENT_ID; `hooks/pokeclaude-hook.sh` sends both. The hook runs on every
+  Claude Code event on this machine, so it must not need changing on the day of the
+  switch - and for the same reason applyHook takes ONLY THE RUNNING BACKEND'S KIND OF
+  ID. A session hosted by the other one is a stranger, and taking its id made a pen with
+  no terminal behind it that appeared on the field and fainted a few seconds later,
+  every time you typed in a terminal of your own.
+- `tests/local-http.test.js` RUNS THE REAL ENTRY POINT by slicing this file and
+  evaluating it with a fixed set of names injected. Every name the entry point reaches
+  for must be in that list, and inside the hook handler's try/catch a missing one is a
+  SWALLOWED ReferenceError - the symptom is a hook that silently does nothing. Do not
+  quote the line it searches for in a comment either; that moves where the slice starts.
+- `toText(s, lines)` MEANS THE LAST N LINES OF CONTENT, NOT OF THE GRID. Claude Code's
+  classic renderer paints at the TOP - logo, composer and footer in rows 0 to 10 - and
+  leaves the other forty blank, so counting back from the bottom of a 50-row grid
+  returned one line of footer and thirty-nine empty rows. agentReady then never saw an
+  agent that had been ready for a minute, and every spawned native pen reported that it
+  had not come up. A TUI that fills the screen is unaffected.
+- THE RELAY REPORTS ITS PTY, which is why it uses `pty.openpty()` and forks by hand
+  rather than `pty.fork()` - that closes the slave without ever naming it. linkSessions
+  matches on tty, and a pen with no tty falls back to guessing the newest transcript in
+  the directory, which is ANOTHER AGENT'S conversation: a brand new Haiku pen reported
+  another session's model and context. The tty travels in the greeting as well as the
+  metadata file, and the greeting is MERGED into what the caller already knew rather
+  than replacing it, because the two arrive in either order.
+- IN THE RELAY, METADATA IS WRITTEN, THEN THE SOCKET IS BOUND, THEN THE CHILD IS FORKED.
+  Both other orders were wrong. Socket first left a window where a client attached to a
+  relay that had not written its metadata and saw a pen with no directory and no tty.
+  Socket last meant a command that exits immediately was gone before the socket existed,
+  and the caller waited out its whole timeout reporting a relay that never came up.
+- `PtyAgent` NEVER EMITS A BARE 'error'. An EventEmitter with no 'error' listener
+  THROWS, so one socket file left by a killed relay took the whole server down at
+  startup before it had drawn anything. The failure is the resolved value, and
+  `attachAll` clears a socket nothing is listening on so every later tick does not
+  retry the same dead file.
+- THE NATIVE BACKEND IS THE DEFAULT. cmux is still imported and one flag away
+  (`POKECLAUDE_BACKEND=cmux`), because a backend you cannot go back to is not one you
+  can trust yet. The order of the switch mattered: the nine live conversations were moved
+  onto relays FIRST and the default moved second, because flipping first would have
+  shown an empty ranch. `index.js` still imports cmux.js
+  and drives every pen through cmux. The pty stack (`vt.js`, `widths.js`,
+  `ptyclient.js`, `native.js`, `tools/pty-agent.py`, `public/js/termview.js`,
+  `public/js/rowdiff.js`, `nativestatus.js`, `subscriptions.js`) runs side by side,
+  reachable through `POKECLAUDE_BACKEND=native` or through
+  `node tools/native-preview.js` on 5181. Verified end to end on the native backend:
+  spawn, readiness, the task typed and submitted, the pen's own model and context and
+  tty and session, and a pen surviving a server restart with its session link intact -
+  which cmux does not manage. What is left before the default moves is the renderer
+  doing enough of what cmux's window does.
+- THE PTY LIVES IN ITS OWN PROCESS, one per pen (`tools/pty-agent.py`), and that is not
+  an optimisation. run-server.sh is a restart loop and `pkill -f "node
+  src/server/index.js"` is the deploy, so a server that held the ptys would kill every
+  agent on every deploy. The relay is started detached, the server attaches over a unix
+  socket, and a reattaching client asks for everything past the byte offset it already
+  had. Frames on that socket are LENGTH-PREFIXED, never newline-delimited: terminal
+  output is binary and full of newlines.
+- The relay ANSWERS THE TERMINAL'S STARTUP QUERIES ITSELF (DA1, XTVERSION, kitty, the
+  colour queries). An agent whose server is restarting must not stall because nothing
+  will tell it what kind of terminal it is, so vt.js computes replies and ptyclient.js
+  throws them away. Signals go to the process GROUP, or killing a pen leaves the real
+  work orphaned and running.
+- The relay SCRUBS the starter's Claude Code session markers (`CLAUDE_CODE_CHILD_SESSION`
+  and friends). A pen is a new session, never a child of ours, and inheriting them makes
+  the agent refuse to save a transcript - which is where PokeClaude reads the model, the
+  context count and the session title.
+- vt.js keeps STYLES, which read-screen could not, and that is load-bearing rather than
+  decorative: Claude Code paints its next-prompt suggestion into the EMPTY composer in
+  dim text, so `composerDraft` (native.js) can see a ghost outright and probeDraft's
+  type-a-letter-and-look is not needed for a native pen. Only UNPREFIXED `CSI m` is SGR
+  - `CSI >4;2m` is modifyOtherKeys, and reading it as SGR underlined and dimmed the
+  whole screen.
+- A SCREEN GOES TO A BROWSER AS CHANGED ROWS, never the whole grid (`rowdiff.js`). The
+  whole grid is ~25KB and a TUI redraws up to twenty times a second; pushing all of it
+  froze the tab outright. Diff frames average ~750 bytes. The row key includes STYLING,
+  not just text, or a composer suggestion going dim would not register as a change.
 - A pen can run CLAUDE CODE or CODEX, chosen with the model in the NEW AGENT form.
   `src/server/engines.js` is the only place that builds the command line, and both of
   its rules exist because the model arrives from a browser: what is run must LOOK like
@@ -537,8 +738,26 @@ Never import upward.
 - The Codex model list is READ FROM `~/.codex/models_cache.json` on every request,
   never hard-coded: it is the account's own list, `visibility: "list"` in the CLI's
   own priority order, and a model OpenAI ships appears in the picker with no edit
-  here. `visibility: "hide"` marks models the account cannot actually run. The Claude
-  list is five names in engines.js because Claude Code publishes no such file.
+  here. `visibility: "hide"` marks models the account cannot actually run.
+- The Claude model list is READ THE SAME WAY, from the catalog Claude Code caches in
+  `~/.claude/cache/model-catalog/<userId>-<hash>-cc.json` (`src/server/models.js`).
+  It used to be five names typed into engines.js, on the belief that Claude Code
+  published no such file; it does, and the belief cost a picker still offering
+  Opus 5 weeks after Opus 5.5 shipped. Only the `-cc.json` SURFACE is Claude Code's -
+  the others in that directory belong to the desktop and web apps and list models this
+  CLI will not take. `section: "main"` is Anthropic's own short list and comes first,
+  `overflow` tops it up to five, and the first row is the form's default, so the default
+  moves on its own. A model whose `min_claude_code_version` is above the installed CLI
+  is dropped: `claude --model` refuses the name and the pen opens and dies, which looks
+  exactly like cmux failing. Both lists fall back to a hard-coded five when the cache is
+  unreadable, because a form with an empty model list is a dead end.
+- `models.js` reads TWO files the CLI writes and neither is ever refetched here. The
+  catalog carries no context window, so `~/.claude/cache/changelog.md` supplies it: one
+  "Added Claude X (`id`) - 1M context" line per model ever shipped. The catalog is what
+  turns those ids into the DISPLAY NAMES the footer prints, which is what the context
+  bar actually matches on. The installed version comes from `.last-update-result.json`
+  first and `claude --version` only as a fallback, because a subprocess is a second on
+  the request that draws the form.
 - Codex draws the same pane shape as Claude Code and none of the same details, so
   every reader in screen.js is written for both. Its composer prompt is "›" (and so
   are its past turns, which is safe only because the box is found by scanning UP); its
@@ -604,6 +823,19 @@ Never import upward.
   then: a tab opened after the last save has no row, and a closed tab's row keeps its
   old tty. A Codex pen spawned ten minutes after a save had no tty, never linked, and
   every reply was refused with "Still identifying this conversation".
+- The input box is the `❯` straight under the box's top rule, and only that one
+  (`inBox` in `src/server/screen.js`). Every sent message is echoed as `❯ words` in
+  the scrollback, and every menu draws its cursor with `❯`. Two Escapes on an empty
+  box open Rewind; its `❯ (current)` was read as a draft, and every queued reply was
+  refused for "unsent text" until the Mac rebooted. A menu is reported as a menu.
+- A queued reply belongs to a conversation, not a pen. `outbox.follow()` moves a
+  reply whose pen is gone to the pen now running its session, so a restore delivers
+  it. It never moves a reply off a pen that is still alive.
+- `parsePs` (`src/server/sessions.js`) must accept `claude` by bare name, not only by
+  a path ending in `/claude`. A native pen starts it off the shell's PATH, so `ps`
+  shows `claude --resume <id>`. Requiring the slash left every native pen with no
+  `procSessionId`, so the roster never recorded one, and the reboot on 2026-09-30 lost
+  them all with an empty restore list. Only the first word counts.
 - A cmux crash kills every agent AND the server (it runs in a cmux tab), and the tabs
   come back hollow. `src/server/roster.js` keeps `data/roster.json`: every session the
   poll saw on a live PROCESS (`procSessionId`/`codexSessionId`, never a hook id, which
@@ -616,6 +848,28 @@ Never import upward.
   hands a session out once, so a double click cannot start two processes on one
   conversation. Test by planting a `running` entry and restarting the server, never by
   crashing cmux under your agents.
+- FIND (Cmd+F, `public/js/find.js`) READS THE WHOLE CONVERSATION before it says "no
+  matches". The pane draws the opening ask plus the newest turns, so a search over what
+  is drawn, which is also all the browser's own find can see, misses every word under
+  "earlier turns not shown". Opening the bar fetches `/api/transcript?all=1`
+  (`readConversation(..., { whole: true })`), the pane then keeps showing every turn,
+  and `mergeTail()` folds each live refresh into it. The bar sits OUTSIDE `#panel-body`,
+  which is rebuilt on every transcript write and would take the input's focus and text
+  with it. Marks are built as elements on text nodes, never as markup, and the live
+  terminal is skipped because its rows are patched from a stream. Cmd+F is taken only
+  in a conversation; on the agent list it opens the archive search, and every other
+  view keeps the browser's find. A turn is still cut at 4000 characters by the parser,
+  so text past that point in one turn is not searched.
+- THE PC SEARCH (`src/server/sessionindex.js`, `GET /api/sessions?dir=&q=`) KEEPS EVERY
+  TRANSCRIPT IN MEMORY and never reads one on a keystroke. A pen for a parent folder can hold 1.6GB
+  of transcripts, because nested repos share its slug prefix. Reading that on demand
+  stalled the server for seconds. A full `readConversation` parse of each file also
+  caused GC pauses near 1s. So opening the PC calls `warm()`, which reads one file per
+  tick. `searchText()` parses only lines that can hold a message, and `titleOf()`
+  counts newlines on the bytes. A search waits for any warm-up still running, and the
+  listing is reused for 2s between keystrokes. Warm, the biggest repo answers in under
+  30ms. Do not move this work back into one synchronous pass, and do not search with
+  `listSessions(dir, Infinity)`. That call reads every file for its title in one pass.
 - No npm dependencies without a strong reason; the zero-dep property is deliberate.
 
 ## Security
@@ -636,3 +890,7 @@ Never import upward.
 - Always specify a terminal `surface_id` for cmux reads and writes. A workspace may
   contain a browser pane; workspace-only calls follow focus and fail with "Surface
   is not a terminal". Refuse ambiguous multiple-terminal workspaces.
+- Every pen runs in bypass mode, resumed or new. `resumeCommand()` in
+  `src/server/engines.js` passes the same flag as `spawnCommand()`; without it the CLI
+  picks its own mode ("auto"), and a restored pen asks for permission where it never
+  did before. `tests/engines.test.js` checks the two commands use the same flag.

@@ -48,21 +48,35 @@ test('a zoom that changes nothing leaves the view exactly where it was', () => {
 // The panel divider. The clamp lives in a module rather than in the drag handler
 // because the interesting cases are the ones a mouse cannot easily produce: a window
 // too narrow to honour the minimum, and a saved width from a wider screen.
-test('the panel keeps a usable width and never eats the field', () => {
+test('the panel keeps a usable width', () => {
   assert.equal(panelWidth(500, 1600), 500, 'a width in range is taken as asked');
   assert.equal(panelWidth(120, 1600), 300, 'too narrow is pulled back to the minimum');
-  assert.equal(panelWidth(5000, 1600), 900, 'too wide stops at the maximum');
+});
+
+// You may read long transcripts with the window on half a screen, where the field's
+// minimum left the panel too narrow. So the panel may take the whole width.
+test('dragged past the edge, the panel takes the whole width', () => {
+  assert.equal(panelWidth(5000, 1600), 1600);
+  assert.equal(panelWidth(Infinity, 1600), 1600, 'a stored "full" restores as full');
+});
+
+// A sliver of field is no use: a 60px field shows nothing and still costs the panel
+// 60px. The field holds at its minimum until the drag is halfway through it, then
+// the panel snaps to full width.
+test('the field holds its minimum, then gives way all at once', () => {
+  assert.equal(panelWidth(1300, 1600), 1180, 'short of halfway, the field keeps 420');
+  assert.equal(panelWidth(1390, 1600), 1600, 'halfway in, the panel snaps to full');
 });
 
 test('a narrow window leaves room for the field, whatever was asked for', () => {
-  // 1000 - 420 = 580 of field, so the panel cannot have more than that.
-  assert.equal(panelWidth(900, 1000), 580);
+  // 1000 - 420 = 580 of field, so a 700 panel is pulled back to 580.
+  assert.equal(panelWidth(700, 1000), 580);
 });
 
 test('the minimum wins on a window too small to satisfy both', () => {
   // 600 - 420 = 180, below the 300 minimum. A panel narrower than 300 is unusable,
   // so it is the field that gives way, not the panel.
-  assert.equal(panelWidth(400, 600), 300);
+  assert.equal(panelWidth(300, 600), 300);
 });
 
 test('a width restored from a wider screen is clamped, not obeyed', () => {

@@ -6,7 +6,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { makeWatcher, appleScript, cronTrouble, speciesFor, describe, summarise, makeSender }
   from '../src/server/notify.js';
-import { hash } from '../public/js/world.js';
 import { DEX } from '../public/js/dex.js';
 import { cronState } from '../public/js/crons.js';
 
@@ -177,11 +176,13 @@ test('a newline in a title cannot smuggle a second AppleScript statement in', ()
 // A notification that says "an agent needs you" makes you go and find out which one.
 // The name on the pen, the repo it is in, and what it actually asked for are the whole
 // point: enough to decide whether to get up, without opening anything.
-test('the same workspace gets the same Pokemon the field drew for it', () => {
-  for (const id of ['20151D9B-A5D9', 'workspace:5', 'B89A3A51-7952-40D4']) {
-    const [dex, name] = DEX[hash(id + 'v2') % DEX.length];
-    assert.deepEqual(speciesFor(id), { dex, name }, id);
-  }
+test('the alert names the Pokemon the snapshot gave the field', () => {
+  for (const i of [0, 24, 150]) assert.deepEqual(speciesFor(i), { dex: DEX[i][0], name: DEX[i][1] });
+  const w = makeWatcher({ settle: 0 });
+  const a = { workspaceId: 'W1', dir: '/x', status: 'WORKING', since: 0, species: 7 };
+  w.check([a], [], 0);
+  const [alert] = w.check([{ ...a, status: 'BLOCKED' }], [], 1);
+  assert.equal(alert?.species, 7, 'the alert carries the index the field drew');
 });
 
 test('the alert names the Pokemon, the repo, what happened, and what it was doing', () => {
