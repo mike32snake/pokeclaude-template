@@ -117,6 +117,9 @@ const reverseIndex = (s) => {
 
 // ---- printing --------------------------------------------------------------------
 
+const STR_MAX = 4096;   // bytes kept from one OSC
+const MARKS_MAX = 32;   // UTF-16 units of combining marks kept on one cell
+
 function putChar(s, cp) {
   const w = charWidth(cp);
   if (w === 0) {
@@ -124,7 +127,8 @@ function putChar(s, cp) {
     const px = s.x - 1;
     if (px >= 0) {
       const i = idx(s, px, s.y);
-      s.buf.marks.set(i, (s.buf.marks.get(i) || '') + String.fromCodePoint(cp));
+      const had = s.buf.marks.get(i) || '';
+      if (had.length < MARKS_MAX) s.buf.marks.set(i, had + String.fromCodePoint(cp));
     }
     return;
   }
@@ -414,12 +418,14 @@ export function write(screen, bytes) {
         // OSC and the private strings end at BEL or at ST (ESC \).
         if (c === 0x07) { if (s.strKind === 'osc') osc(s); s.state = 'ground'; }
         else if (c === 0x1b) s.state = 'str-esc';
-        else s.str.push(c);
+        // Keep scanning for the end, but a title never needs more than this, and a
+        // string with no end would otherwise grow for as long as the pen prints.
+        else if (s.strKind === 'osc' && s.str.length < STR_MAX) s.str.push(c);
         break;
       }
       case 'str-esc': {
         if (c === 0x5c) { if (s.strKind === 'osc') osc(s); s.state = 'ground'; }
-        else { s.str.push(0x1b, c); s.state = 'str'; }
+        else { if (s.strKind === 'osc' && s.str.length < STR_MAX - 1) s.str.push(0x1b, c); s.state = 'str'; }
         break;
       }
       default: s.state = 'ground';
@@ -428,10 +434,13 @@ export function write(screen, bytes) {
   return s.replies.length ? Buffer.from(s.replies.join(''), 'utf8') : Buffer.alloc(0);
 }
 
+// A pen's output is untrusted. Past U+10FFFF String.fromCodePoint throws, and a lone
+// surrogate is not a character, so both become U+FFFD here, before the grid sees them.
 function decodeU8(b) {
-  if (b.length === 2) return ((b[0] & 0x1f) << 6) | (b[1] & 0x3f);
-  if (b.length === 3) return ((b[0] & 0x0f) << 12) | ((b[1] & 0x3f) << 6) | (b[2] & 0x3f);
-  return ((b[0] & 0x07) << 18) | ((b[1] & 0x3f) << 12) | ((b[2] & 0x3f) << 6) | (b[3] & 0x3f);
+  const cp = b.length === 2 ? ((b[0] & 0x1f) << 6) | (b[1] & 0x3f)
+           : b.length === 3 ? ((b[0] & 0x0f) << 12) | ((b[1] & 0x3f) << 6) | (b[2] & 0x3f)
+           : ((b[0] & 0x07) << 18) | ((b[1] & 0x3f) << 12) | ((b[2] & 0x3f) << 6) | (b[3] & 0x3f);
+  return cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff) ? 0xfffd : cp;
 }
 
 function hardReset(s) {

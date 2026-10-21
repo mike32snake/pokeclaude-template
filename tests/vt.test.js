@@ -285,3 +285,28 @@ test('a resize keeps what still fits and does not throw away the cursor', () => 
   assert.equal(line(s, 0), 'hello');
   assert.ok(cursorRowCol(s).row < 3);
 });
+
+// A pen's output is untrusted. A 4-byte UTF-8 lead can encode past U+10FFFF, and
+// String.fromCodePoint throws on that, so one bad sequence used to break every read.
+test('a codepoint past U+10FFFF becomes U+FFFD instead of throwing on read', () => {
+  const s = createScreen(20, 3);
+  write(s, Buffer.from([0x61, 0xf7, 0xbf, 0xbf, 0xbf, 0xf4, 0x90, 0x80, 0x80, 0x62]));
+  assert.doesNotThrow(() => toText(s));
+  assert.doesNotThrow(() => cellRows(s));
+  assert.match(toText(s), /^a��b/);
+});
+
+// An OSC with no terminator, or a very long one, must not grow without limit.
+test('an unterminated string sequence keeps a bounded payload', () => {
+  const s = createScreen(20, 3);
+  write(s, Buffer.concat([Buffer.from('\x1b]0;'), Buffer.alloc(1 << 20, 0x41)]));
+  assert.ok(s.str.length <= 4096, `str holds ${s.str.length} bytes`);
+  write(s, Buffer.from('\x07ok'));
+  assert.match(toText(s), /ok/);
+});
+
+test('combining marks on one cell are capped', () => {
+  const s = createScreen(20, 3);
+  write(s, Buffer.from('a' + '́'.repeat(100000), 'utf8'));
+  for (const m of s.buf.marks.values()) assert.ok(m.length <= 32, `marks hold ${m.length} units`);
+});
